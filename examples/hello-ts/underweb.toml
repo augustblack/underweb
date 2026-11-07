@@ -1,0 +1,6 @@
+[package]
+name = "hello-ts"
+version = "0.1.0"
+kind = "ts"
+entry = "main.ts"
+description = "demos/05animation, ported to TypeScript: a Bezier curve driven by sines."

@@ -1,0 +1,256 @@
+//! Native (Rust or C) packages: a shared library called through the C ABI
+//! in `underweb-abi`.
+
+use std::cell::RefCell;
+use std::ffi::{CStr, CString, c_char, c_void};
+use std::path::Path;
+use std::rc::Rc;
+
+use anyhow::{Context, Result, bail};
+use libloading::Library;
+use underweb_abi::*;
+use underweb_guest::{PathOp, Rgba, Scene, Shape, cairo};
+use underweb_ipc::{Channel, GuestMsg};
+
+use crate::page::Page;
+
+struct Ctx {
+    scene: Rc<RefCell<Scene>>,
+    /// Owns the string last returned by `param`.
+    param: RefCell<Option<CString>>,
+    /// Raw pointer to the channel, alive for the whole run.
+    chan: *const Channel,
+}
+
+pub struct NativePage {
+    host: Box<UwHost>,
+    _ctx: Box<Ctx>,
+    activate: UwActivateFn,
+    update: Option<UwUpdateFn>,
+    pointer: Option<UwPointerFn>,
+    draw: Option<UwDrawFn>,
+    deactivate: Option<UwDeactivateFn>,
+    // last: unloading must happen after everything above
+    _lib: Library,
+}
+
+impl NativePage {
+    pub fn load(path: &Path, scene: Rc<RefCell<Scene>>, chan: &Channel) -> Result<NativePage> {
+        let lib =
+            unsafe { Library::new(path) }.with_context(|| format!("loading {}", path.display()))?;
+        unsafe {
+            let version: UwAbiVersionFn =
+                *lib.get(b"uw_abi_version\0").context("uw_abi_version")?;
+            let v = version();
+            if v != UW_ABI_VERSION {
+                bail!("package built for ABI {v}, this runner speaks {UW_ABI_VERSION}");
+            }
+            let activate: UwActivateFn = *lib.get(b"uw_activate\0").context("uw_activate")?;
+            let update = lib.get::<UwUpdateFn>(b"uw_update\0").ok().map(|s| *s);
+            let pointer = lib.get::<UwPointerFn>(b"uw_pointer\0").ok().map(|s| *s);
+            let draw = lib.get::<UwDrawFn>(b"uw_draw\0").ok().map(|s| *s);
+            let deactivate = lib
+                .get::<UwDeactivateFn>(b"uw_deactivate\0")
+                .ok()
+                .map(|s| *s);
+
+            let mut ctx = Box::new(Ctx {
+                scene,
+                param: RefCell::new(None),
+                chan,
+            });
+            let host = Box::new(host_table(&mut *ctx as *mut Ctx as *mut c_void));
+            Ok(NativePage {
+                host,
+                _ctx: ctx,
+                activate,
+                update,
+                pointer,
+                draw,
+                deactivate,
+                _lib: lib,
+            })
+        }
+    }
+}
+
+impl Page for NativePage {
+    fn activate(&mut self) -> Result<()> {
+        unsafe { (self.activate)(&*self.host) };
+        Ok(())
+    }
+
+    fn update(&mut self, dt: f64) -> Result<()> {
+        if let Some(f) = self.update {
+            unsafe { f(&*self.host, dt) };
+        }
+        Ok(())
+    }
+
+    fn pointer(&mut self, ev: &UwPointerEvent) -> Result<()> {
+        if let Some(f) = self.pointer {
+            unsafe { f(&*self.host, ev) };
+        }
+        Ok(())
+    }
+
+    fn draw(&mut self, cr: &cairo::Context, w: f64, h: f64) {
+        if let Some(f) = self.draw {
+            unsafe { f(&*self.host, cr.to_raw_none() as *mut c_void, w, h) };
+        }
+    }
+
+    fn deactivate(&mut self) {
+        if let Some(f) = self.deactivate {
+            unsafe { f(&*self.host) };
+        }
+    }
+}
+
+// ---- the function table -------------------------------------------------
+
+fn ctx<'a>(p: *mut c_void) -> &'a Ctx {
+    unsafe { &*(p as *const Ctx) }
+}
+
+/// Run `f` on the scene. Calls made while the scene is being rendered
+/// (from `uw_draw`) can't modify it and are ignored.
+fn with_scene<R: Default>(p: *mut c_void, f: impl FnOnce(&mut Scene) -> R) -> R {
+    match ctx(p).scene.try_borrow_mut() {
+        Ok(mut s) => f(&mut s),
+        Err(_) => R::default(),
+    }
+}
+
+fn shape(p: *mut c_void, id: u32, f: impl FnOnce(&mut Shape)) {
+    with_scene(p, |s| f(s.shape_mut(id)))
+}
+
+fn string(s: *const c_char) -> String {
+    if s.is_null() {
+        String::new()
+    } else {
+        unsafe { CStr::from_ptr(s) }.to_string_lossy().into_owned()
+    }
+}
+
+extern "C" fn set_title(p: *mut c_void, t: *const c_char) {
+    with_scene(p, |s| s.set_title(&string(t)))
+}
+extern "C" fn add_layout(p: *mut c_void, l: u32) {
+    with_scene(p, |s| s.add_layout(l))
+}
+extern "C" fn set_animating(p: *mut c_void, on: bool) {
+    with_scene(p, |s| s.animating = on)
+}
+extern "C" fn request_redraw(p: *mut c_void) {
+    with_scene(p, |s| s.request_redraw())
+}
+extern "C" fn width(p: *mut c_void) -> f64 {
+    ctx(p).scene.try_borrow().map(|s| s.width).unwrap_or(0.0)
+}
+extern "C" fn height(p: *mut c_void) -> f64 {
+    ctx(p).scene.try_borrow().map(|s| s.height).unwrap_or(0.0)
+}
+extern "C" fn param(p: *mut c_void, key: *const c_char) -> *const c_char {
+    let c = ctx(p);
+    let value = c
+        .scene
+        .try_borrow()
+        .ok()
+        .and_then(|s| s.params.get(&string(key)).cloned());
+    let mut slot = c.param.borrow_mut();
+    *slot = value.and_then(|v| CString::new(v).ok());
+    slot.as_ref().map_or(std::ptr::null(), |s| s.as_ptr())
+}
+extern "C" fn log(p: *mut c_void, m: *const c_char) {
+    let chan = unsafe { &*ctx(p).chan };
+    let _ = chan.send(&GuestMsg::Log(string(m)), None);
+}
+extern "C" fn layout_new(p: *mut c_void) -> u32 {
+    with_scene(p, |s| s.layout_new())
+}
+extern "C" fn layout_append(p: *mut c_void, l: u32, sh: u32) {
+    with_scene(p, |s| s.layout_append(l, sh))
+}
+extern "C" fn shape_new(p: *mut c_void) -> u32 {
+    with_scene(p, |s| s.shape_new())
+}
+extern "C" fn shape_clear_path(p: *mut c_void, id: u32) {
+    shape(p, id, |s| s.path.clear())
+}
+extern "C" fn shape_rectangle(p: *mut c_void, id: u32, x: f64, y: f64, w: f64, h: f64) {
+    shape(p, id, |s| s.path.push(PathOp::Rectangle(x, y, w, h)))
+}
+extern "C" fn shape_move_to(p: *mut c_void, id: u32, x: f64, y: f64) {
+    shape(p, id, |s| s.path.push(PathOp::MoveTo(x, y)))
+}
+extern "C" fn shape_line_to(p: *mut c_void, id: u32, x: f64, y: f64) {
+    shape(p, id, |s| s.path.push(PathOp::LineTo(x, y)))
+}
+#[allow(clippy::too_many_arguments)]
+extern "C" fn shape_curve_to(
+    p: *mut c_void,
+    id: u32,
+    a: f64,
+    b: f64,
+    c: f64,
+    d: f64,
+    e: f64,
+    f: f64,
+) {
+    shape(p, id, |s| s.path.push(PathOp::CurveTo(a, b, c, d, e, f)))
+}
+extern "C" fn shape_close_path(p: *mut c_void, id: u32) {
+    shape(p, id, |s| s.path.push(PathOp::Close))
+}
+extern "C" fn shape_set_fill_color(p: *mut c_void, id: u32, r: f64, g: f64, b: f64, a: f64) {
+    shape(p, id, |s| s.fill = Some(Rgba(r, g, b, a)))
+}
+extern "C" fn shape_set_stroke_color(p: *mut c_void, id: u32, r: f64, g: f64, b: f64, a: f64) {
+    shape(p, id, |s| s.stroke = Some(Rgba(r, g, b, a)))
+}
+extern "C" fn shape_set_stroke_width(p: *mut c_void, id: u32, w: f64) {
+    shape(p, id, |s| s.stroke_width = w)
+}
+extern "C" fn shape_set_text(p: *mut c_void, id: u32, t: *const c_char) {
+    let t = string(t);
+    shape(p, id, |s| s.text = Some(t))
+}
+extern "C" fn shape_set_text_color(p: *mut c_void, id: u32, r: f64, g: f64, b: f64, a: f64) {
+    shape(p, id, |s| s.text_color = Rgba(r, g, b, a))
+}
+extern "C" fn shape_set_font(p: *mut c_void, id: u32, f: *const c_char) {
+    let f = string(f);
+    shape(p, id, |s| s.font = f)
+}
+
+fn host_table(ctx: *mut c_void) -> UwHost {
+    UwHost {
+        abi_version: UW_ABI_VERSION,
+        ctx,
+        set_title,
+        add_layout,
+        set_animating,
+        request_redraw,
+        width,
+        height,
+        param,
+        log,
+        layout_new,
+        layout_append,
+        shape_new,
+        shape_clear_path,
+        shape_rectangle,
+        shape_move_to,
+        shape_line_to,
+        shape_curve_to,
+        shape_close_path,
+        shape_set_fill_color,
+        shape_set_stroke_color,
+        shape_set_stroke_width,
+        shape_set_text,
+        shape_set_text_color,
+        shape_set_font,
+    }
+}

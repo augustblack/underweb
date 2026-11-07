@@ -1,0 +1,13 @@
+[package]
+name = "underweb-ipc"
+description = "Host <-> runner messages, socket transport with fd passing, shared-memory frames"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+serde.workspace = true
+postcard.workspace = true
+nix.workspace = true
+libc.workspace = true

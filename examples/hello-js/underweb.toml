@@ -1,0 +1,6 @@
+[package]
+name = "hello-js"
+version = "0.1.0"
+kind = "js"
+entry = "main.js"
+description = "demos/01shape.js, ported: a shape with text. Click it."

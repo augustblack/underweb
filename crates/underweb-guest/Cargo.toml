@@ -1,0 +1,11 @@
+[package]
+name = "underweb-guest"
+description = "The curated Underweb page API (layouts, shapes, text) and its cairo/pango renderer"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+cairo-rs.workspace = true
+pango.workspace = true
+pangocairo.workspace = true

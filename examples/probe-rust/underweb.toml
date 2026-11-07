@@ -1,0 +1,18 @@
+[package]
+name = "probe-rust"
+version = "0.1.0"
+kind = "rust"
+description = "Sandbox test: tries things a package must not be able to do."
+
+# filled in by `cargo xtask examples`
+[targets.aarch64-apple-darwin]
+file = "dist/aarch64-apple-darwin/libprobe_rust.dylib"
+
+[targets.x86_64-apple-darwin]
+file = "dist/x86_64-apple-darwin/libprobe_rust.dylib"
+
+[targets.x86_64-unknown-linux-gnu]
+file = "dist/x86_64-unknown-linux-gnu/libprobe_rust.so"
+
+[targets.aarch64-unknown-linux-gnu]
+file = "dist/aarch64-unknown-linux-gnu/libprobe_rust.so"

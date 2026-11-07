@@ -1,0 +1,41 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/*",
+    "apps/underweb-app",
+    "xtask",
+    "examples/hello-rust",
+    "examples/probe-rust",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "GPL-3.0-or-later"
+repository = "https://github.com/augustblack/underweb-rs"
+
+[workspace.dependencies]
+underweb-abi = { path = "crates/underweb-abi" }
+underweb-ipc = { path = "crates/underweb-ipc" }
+underweb-sandbox = { path = "crates/underweb-sandbox" }
+underweb-guest = { path = "crates/underweb-guest" }
+underweb-pkg = { path = "crates/underweb-pkg" }
+underweb-core = { path = "crates/underweb-core" }
+underweb = { path = "crates/underweb", default-features = false }
+
+anyhow = "1"
+serde = { version = "1", features = ["derive"] }
+postcard = { version = "1", features = ["use-std"] }
+toml = "1"
+nix = { version = "0.31", features = ["socket", "uio", "mman", "fs"] }
+libc = "0.2"
+cairo-rs = { version = "0.21", features = ["png"] }
+pango = "0.21"
+pangocairo = "0.21"
+
+[profile.dev]
+# keep target/ small: V8, swc and wgpu are big
+debug = "line-tables-only"
+
+[profile.dev.package."*"]
+debug = false

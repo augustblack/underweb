@@ -1,0 +1,29 @@
+language = "C"
+header = """#ifndef UNDERWEB_H
+#define UNDERWEB_H"""
+autogen_warning = "/* Generated from crates/underweb-abi by `cargo xtask header`. Do not edit. */"
+sys_includes = ["stdbool.h", "stdint.h"]
+no_includes = true
+documentation_style = "c99"
+trailer = """
+/* A native package exports these. Only uw_abi_version and uw_activate are
+ * required. uw_draw gets a cairo_t* (include <cairo.h> to use it). */
+uint32_t uw_abi_version(void);
+void uw_activate(const UwHost *host);
+void uw_update(const UwHost *host, double dt);
+void uw_pointer(const UwHost *host, const UwPointerEvent *ev);
+void uw_draw(const UwHost *host, void *cr, double w, double h);
+void uw_deactivate(const UwHost *host);
+
+/* Convenience: call a host function with its context, e.g.
+ *   UW(host, set_title, "hello");                                       */
+#define UW(host, fn, ...) ((host)->fn((host)->ctx, ##__VA_ARGS__))
+
+#endif /* UNDERWEB_H */
+"""
+
+[export]
+include = ["UwHost", "UwPointerEvent"]
+exclude = ["UwAbiVersionFn", "UwActivateFn", "UwUpdateFn", "UwPointerFn", "UwDrawFn", "UwDeactivateFn"]
+
+[defines]

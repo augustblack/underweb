@@ -1,0 +1,15 @@
+[package]
+name = "underweb-core"
+description = "The Underweb engine as a library: runs packages in sandboxed runner processes"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+underweb-ipc.workspace = true
+underweb-pkg.workspace = true
+underweb-abi.workspace = true
+
+[dev-dependencies]
+cairo-rs.workspace = true

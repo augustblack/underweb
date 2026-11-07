@@ -1,0 +1,19 @@
+[package]
+name = "underweb-runner"
+description = "Sandboxed per-package process: runs JS/TS (V8) or native (Rust/C) packages"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+underweb-abi.workspace = true
+underweb-ipc.workspace = true
+underweb-guest.workspace = true
+underweb-pkg.workspace = true
+underweb-sandbox.workspace = true
+deno_core = "0.413"
+deno_error = "=0.7.1"
+deno_ast = { version = "0.53", features = ["transpiling"] }
+tokio = { version = "1", features = ["rt"] }
+libloading = "0.9"

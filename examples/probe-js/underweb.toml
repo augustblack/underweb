@@ -1,0 +1,6 @@
+[package]
+name = "probe-js"
+version = "0.1.0"
+kind = "js"
+entry = "main.js"
+description = "Sandbox test: JS packages get no Deno/Node/web I/O APIs and can't import outside the package."

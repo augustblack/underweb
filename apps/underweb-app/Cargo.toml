@@ -1,0 +1,18 @@
+[package]
+name = "underweb-app"
+description = "The Underweb browser"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "underweb"
+path = "src/main.rs"
+
+[dependencies]
+anyhow.workspace = true
+underweb-core.workspace = true
+eframe = { version = "0.33", default-features = false, features = ["accesskit", "default_fonts", "wgpu", "wayland", "x11"] }
+png = "0.17"
+# eframe without default features leaves wgpu with no backend; take its defaults (Metal, Vulkan, DX12, GL)
+wgpu = "27"

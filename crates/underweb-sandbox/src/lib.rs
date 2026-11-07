@@ -1,0 +1,110 @@
+//! Locks the calling process down so package code can only:
+//! read its own package directory and system libraries/fonts, read and
+//! write its private data directory, and talk over file descriptors it
+//! already holds (the IPC socket). No network, no process creation, no
+//! access to the user's files.
+//!
+//! The runner calls [`lockdown`] after it has set up IPC, V8 and fonts and
+//! before it loads any package code. Lockdown cannot be undone.
+//!
+//! | OS | Mechanism |
+//! |---|---|
+//! | macOS | `sandbox_init` with an SBPL profile (what Chromium uses) |
+//! | Linux | Landlock (filesystem) + seccomp-bpf (sockets, exec, fork) |
+//! | Windows | not yet: runners are reported as unsandboxed |
+
+use std::path::{Path, PathBuf};
+
+use anyhow::{Context, Result};
+
+#[cfg(target_os = "linux")]
+mod linux;
+#[cfg(target_os = "macos")]
+mod macos;
+
+#[derive(Debug, Clone, Default)]
+pub struct Policy {
+    /// Directories readable by the package (its own files).
+    pub read_only: Vec<PathBuf>,
+    /// Directories readable and writable (its private data dir).
+    pub read_write: Vec<PathBuf>,
+}
+
+impl Policy {
+    /// Resolve symlinks (/tmp -> /private/tmp on macOS); the kernel-side
+    /// rules match real paths only.
+    fn canonical(&self) -> Result<Policy> {
+        let canon = |paths: &[PathBuf]| -> Result<Vec<PathBuf>> {
+            paths
+                .iter()
+                .map(|p| {
+                    p.canonicalize()
+                        .with_context(|| format!("sandbox path {}", p.display()))
+                })
+                .collect()
+        };
+        Ok(Policy {
+            read_only: canon(&self.read_only)?,
+            read_write: canon(&self.read_write)?,
+        })
+    }
+}
+
+/// Whether [`lockdown`] actually restricts anything on this OS.
+pub fn is_supported() -> bool {
+    cfg!(any(target_os = "macos", target_os = "linux"))
+}
+
+/// Restrict the current process. Irreversible.
+pub fn lockdown(policy: &Policy) -> Result<()> {
+    let policy = policy.canonical()?;
+    imp(&policy)
+}
+
+#[cfg(target_os = "macos")]
+fn imp(policy: &Policy) -> Result<()> {
+    macos::lockdown(policy)
+}
+
+#[cfg(target_os = "linux")]
+fn imp(policy: &Policy) -> Result<()> {
+    linux::lockdown(policy)
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+fn imp(_policy: &Policy) -> Result<()> {
+    anyhow::bail!("no sandbox on this platform yet")
+}
+
+/// Directories that hold shared libraries and fonts on this system, which
+/// a runner may read after lockdown.
+pub fn system_read_paths() -> Vec<PathBuf> {
+    let candidates: &[&str] = if cfg!(target_os = "macos") {
+        &[
+            "/System",
+            "/usr/lib",
+            "/usr/share",
+            "/Library/Fonts",
+            "/opt/homebrew",
+            "/usr/local/lib",
+            "/usr/local/share",
+            "/usr/local/etc/fonts",
+            "/private/var/db/timezone",
+        ]
+    } else {
+        &[
+            "/usr",
+            "/lib",
+            "/lib64",
+            "/etc/fonts",
+            "/etc/ld.so.cache",
+            "/var/cache/fontconfig",
+        ]
+    };
+    candidates
+        .iter()
+        .map(Path::new)
+        .filter(|p| p.exists())
+        .map(Path::to_path_buf)
+        .collect()
+}

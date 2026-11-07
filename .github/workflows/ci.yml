@@ -1,0 +1,44 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, ubuntu-24.04]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Native libraries (macOS)
+        if: runner.os == 'macOS'
+        run: brew install cairo pango pkgconf
+
+      - name: Native libraries (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y pkg-config libcairo2-dev libpango1.0-dev \
+            libxkbcommon-dev libwayland-dev libx11-dev fonts-dejavu-core
+
+      - name: Header is up to date
+        run: |
+          cargo xtask header
+          git diff --exit-code include/underweb.h
+
+      - name: Build and test (includes the sandbox tests)
+        run: cargo xtask test
+
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings

@@ -1,0 +1,18 @@
+[package]
+name = "hello-rust"
+version = "0.1.0"
+kind = "rust"
+description = "demos/01shape + 08draw_cb, ported to Rust: shapes, and raw cairo drawing."
+
+# filled in by `cargo xtask examples`
+[targets.aarch64-apple-darwin]
+file = "dist/aarch64-apple-darwin/libhello_rust.dylib"
+
+[targets.x86_64-apple-darwin]
+file = "dist/x86_64-apple-darwin/libhello_rust.dylib"
+
+[targets.x86_64-unknown-linux-gnu]
+file = "dist/x86_64-unknown-linux-gnu/libhello_rust.so"
+
+[targets.aarch64-unknown-linux-gnu]
+file = "dist/aarch64-unknown-linux-gnu/libhello_rust.so"
