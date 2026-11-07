@@ -1,0 +1,11 @@
+[package]
+name = "probe-net-js"
+version = "0.1.0"
+kind = "js"
+entry = "main.js"
+description = "Network/storage test. The tests rewrite [permissions] with their ports."
+
+[permissions]
+net.tcp.connect = ["127.0.0.1:7"]
+net.udp.send = ["127.0.0.1:7"]
+fetch = ["http://127.0.0.1:7/"]

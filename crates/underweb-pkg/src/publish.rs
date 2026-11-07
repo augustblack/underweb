@@ -162,9 +162,13 @@ pub fn publishable_cargo_toml(text: &str) -> Result<String> {
     tables.extend(deps.into_iter().map(|(_, v)| v));
     // [target.'cfg(...)'.dependencies] and friends
     for (_, targets) in rest.into_iter().filter(|(k, _)| k.get() == "target") {
-        let Some(targets) = targets.as_table_like_mut() else { continue };
+        let Some(targets) = targets.as_table_like_mut() else {
+            continue;
+        };
         for (_, cfg) in targets.iter_mut() {
-            let Some(cfg) = cfg.as_table_like_mut() else { continue };
+            let Some(cfg) = cfg.as_table_like_mut() else {
+                continue;
+            };
             for (k, deps) in cfg.iter_mut() {
                 if k.get().ends_with("dependencies") {
                     tables.push(deps);

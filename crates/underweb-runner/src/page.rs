@@ -5,13 +5,15 @@ use std::cell::RefCell;
 use anyhow::{Context, Result};
 use underweb_abi::UwPointerEvent;
 use underweb_guest::{Scene, cairo};
-use underweb_ipc::{Channel, GuestMsg, HostMsg, Shm};
+use underweb_ipc::{Channel, GuestMsg, HostMsg, NetEvent, Shm};
 
 /// A loaded package, whatever language it is written in.
 pub trait Page {
     fn activate(&mut self) -> Result<()>;
     fn update(&mut self, dt: f64) -> Result<()>;
     fn pointer(&mut self, ev: &UwPointerEvent) -> Result<()>;
+    /// A network event for one of the package's handles.
+    fn net(&mut self, ev: NetEvent) -> Result<()>;
     /// Raw cairo drawing on top of the scene (native packages only).
     fn draw(&mut self, _cr: &cairo::Context, _w: f64, _h: f64) {}
     fn deactivate(&mut self) {}
@@ -92,6 +94,7 @@ pub fn run(chan: &Channel, scene: &RefCell<Scene>, page: &mut dyn Page) -> Resul
                     f.free[(index & 1) as usize] = true;
                 }
             }
+            HostMsg::Net(ev) => page.net(ev).context("net")?,
             HostMsg::Shutdown => break,
         }
     }

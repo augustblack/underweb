@@ -14,6 +14,7 @@ void uw_update(const UwHost *host, double dt);
 void uw_pointer(const UwHost *host, const UwPointerEvent *ev);
 void uw_draw(const UwHost *host, void *cr, double w, double h);
 void uw_deactivate(const UwHost *host);
+void uw_net(const UwHost *host, const UwNetEvent *ev);
 
 /* Convenience: call a host function with its context, e.g.
  *   UW(host, set_title, "hello");                                       */
@@ -23,7 +24,7 @@ void uw_deactivate(const UwHost *host);
 """
 
 [export]
-include = ["UwHost", "UwPointerEvent"]
-exclude = ["UwAbiVersionFn", "UwActivateFn", "UwUpdateFn", "UwPointerFn", "UwDrawFn", "UwDeactivateFn"]
+include = ["UwHost", "UwPointerEvent", "UwNetEvent"]
+exclude = ["UwAbiVersionFn", "UwActivateFn", "UwUpdateFn", "UwPointerFn", "UwDrawFn", "UwDeactivateFn", "UwNetFn"]
 
 [defines]

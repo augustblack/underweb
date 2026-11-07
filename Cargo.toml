@@ -6,6 +6,7 @@ members = [
     "xtask",
     "examples/hello-rust",
     "examples/probe-rust",
+    "examples/probe-net-rust",
 ]
 
 [workspace.package]

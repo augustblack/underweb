@@ -7,8 +7,8 @@ use std::time::Instant;
 
 use eframe::egui;
 use underweb_core::{
-    Guest, GuestEvent, Origin, Resolved, SpawnOptions, Store, UW_POINTER_MOVE, UW_POINTER_PRESS,
-    UW_POINTER_RELEASE,
+    Decision, GrantState, Guest, GuestEvent, Origin, Resolved, SpawnOptions, Store,
+    UW_POINTER_MOVE, UW_POINTER_PRESS, UW_POINTER_RELEASE,
 };
 
 /// Messages from the thread that resolves (downloads, builds) a package.
@@ -74,6 +74,7 @@ pub struct Tab {
     pub status: Status,
     pub log: Vec<String>,
     pub sandbox: bool,
+    pub allow_declared: bool,
     title: String,
     guest: Option<Guest>,
     texture: Option<egui::TextureHandle>,
@@ -82,6 +83,8 @@ pub struct Tab {
     last_tick: Option<Instant>,
     started: bool,
     loading: Option<Receiver<Loading>>,
+    /// Permission requests waiting for the user: (id, description).
+    prompts: Vec<(u64, String)>,
 }
 
 impl Tab {
@@ -91,6 +94,7 @@ impl Tab {
             status: Status::Empty,
             log: Vec::new(),
             sandbox: true,
+            allow_declared: false,
             title: String::new(),
             guest: None,
             texture: None,
@@ -99,6 +103,7 @@ impl Tab {
             last_tick: None,
             started: false,
             loading: None,
+            prompts: Vec::new(),
         }
     }
 
@@ -132,6 +137,7 @@ impl Tab {
         self.last_tick = None;
         self.started = false;
         self.loading = None;
+        self.prompts.clear();
         self.status = Status::Empty;
     }
 
@@ -162,9 +168,20 @@ impl Tab {
 
     fn spawn(&mut self, ctx: &egui::Context, resolved: Resolved) {
         let wake_ctx = ctx.clone();
+        // grants belong to where the package came from, not just its name
+        let identity = match &resolved.origin {
+            Origin::Remote { index_url, .. } => Some(index_url.clone()),
+            Origin::Local => None,
+        };
         let opts = SpawnOptions {
             sandbox: self.sandbox,
             params: resolved.params,
+            identity,
+            permissions: if self.allow_declared {
+                underweb_core::PermissionPolicy::AllowDeclared
+            } else {
+                underweb_core::PermissionPolicy::Ask
+            },
             wake: Some(Arc::new(move || wake_ctx.request_repaint())),
             ..Default::default()
         };
@@ -248,6 +265,12 @@ impl Tab {
                         }
                     }
                 }
+                GuestEvent::PermissionRequest {
+                    id, description, ..
+                } => {
+                    self.log.push(format!("asks to {description}"));
+                    self.prompts.push((id, description));
+                }
                 GuestEvent::Exited(_) => {
                     // the process may take a moment to be reapable
                     std::thread::sleep(std::time::Duration::from_millis(20));
@@ -264,6 +287,74 @@ impl Tab {
                 }
             }
         }
+    }
+
+    /// The oldest pending permission request, as a bar above the page.
+    pub fn prompt_bar(&mut self, ctx: &egui::Context) {
+        let Some((id, description)) = self.prompts.first().cloned() else {
+            return;
+        };
+        let name = self
+            .guest
+            .as_ref()
+            .map_or("This page".to_string(), |g| g.package.name().to_string());
+        egui::TopBottomPanel::top("permission").show(ctx, |ui| {
+            ui.horizontal(|ui| {
+                ui.label(egui::RichText::new(format!("{name} wants to {description}.")).strong());
+                let mut answer = None;
+                if ui.button("Allow once").clicked() {
+                    answer = Some(Decision::AllowOnce);
+                }
+                if ui.button("Always allow").clicked() {
+                    answer = Some(Decision::AllowAlways);
+                }
+                if ui.button("Deny").clicked() {
+                    answer = Some(Decision::Deny);
+                }
+                if let Some(d) = answer {
+                    if let Some(g) = &self.guest {
+                        g.answer(id, d);
+                    }
+                    self.log.push(format!("{d:?}: {description}"));
+                    self.prompts.remove(0);
+                }
+                if self.prompts.len() > 1 {
+                    ui.weak(format!("({} more)", self.prompts.len() - 1));
+                }
+            });
+        });
+    }
+
+    /// What the package declared and what was decided.
+    pub fn permissions_ui(&mut self, ui: &mut egui::Ui) {
+        let Some(g) = &self.guest else {
+            ui.weak("No package open.");
+            return;
+        };
+        let perms = g.permissions();
+        if perms.is_empty() {
+            ui.label(format!(
+                "{} asks for no permissions: no network access.",
+                g.package.name()
+            ));
+            return;
+        }
+        ui.label(format!("{} may ask to:", g.package.name()));
+        egui::Grid::new("perms").striped(true).show(ui, |ui| {
+            for (p, state) in perms {
+                ui.label(p.describe());
+                ui.label(match state {
+                    GrantState::Undecided => "not asked yet",
+                    GrantState::AllowedOnce => "allowed until closed",
+                    GrantState::AllowedAlways => "always allowed",
+                    GrantState::Denied => "denied",
+                });
+                if state != GrantState::Undecided && ui.small_button("Forget").clicked() {
+                    g.forget(&p);
+                }
+                ui.end_row();
+            }
+        });
     }
 
     /// Draw the page into the central panel and forward input.

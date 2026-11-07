@@ -84,6 +84,110 @@ impl Window {
         let h = host();
         (h.log)(h.ctx, cstring(message).as_ptr())
     }
+    /// The package's private directory, the only place it can write.
+    pub fn data_dir(&self) -> std::path::PathBuf {
+        let h = host_v2();
+        let p = (h.data_dir)(h.ctx);
+        unsafe { CStr::from_ptr(p) }
+            .to_string_lossy()
+            .into_owned()
+            .into()
+    }
+}
+
+/// The ABI 2 functions exist only in newer runners.
+fn host_v2() -> &'static UwHost {
+    let h = host();
+    assert!(
+        h.abi_version >= 2,
+        "this browser is too old for network and storage functions"
+    );
+    h
+}
+
+/// Networking through the browser. Every call returns a [`net::Handle`] at
+/// once; results arrive as [`net::NetEvent`]s in [`Page::net`]. Each needs a
+/// permission declared in underweb.toml and granted by the user.
+pub mod net {
+    use super::{cstring, host_v2};
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+    pub struct Handle(pub u32);
+
+    pub fn tcp_connect(host: &str, port: u16) -> Handle {
+        let h = host_v2();
+        Handle((h.net_tcp_connect)(h.ctx, cstring(host).as_ptr(), port))
+    }
+    pub fn tcp_listen(port: u16) -> Handle {
+        let h = host_v2();
+        Handle((h.net_tcp_listen)(h.ctx, port))
+    }
+    /// Port 0: an ephemeral port, for sending.
+    pub fn udp_open(port: u16) -> Handle {
+        let h = host_v2();
+        Handle((h.net_udp_open)(h.ctx, port))
+    }
+    /// An HTTP(S) request. Redirects are not followed.
+    pub fn fetch(method: &str, url: &str, headers: &[(&str, &str)], body: &[u8]) -> Handle {
+        let h = host_v2();
+        let headers: String = headers.iter().map(|(k, v)| format!("{k}: {v}\n")).collect();
+        Handle((h.fetch)(
+            h.ctx,
+            cstring(method).as_ptr(),
+            cstring(url).as_ptr(),
+            cstring(&headers).as_ptr(),
+            body.as_ptr(),
+            body.len(),
+        ))
+    }
+
+    impl Handle {
+        /// Write to a TCP connection.
+        pub fn send(&self, data: &[u8]) {
+            let h = host_v2();
+            (h.net_send)(h.ctx, self.0, data.as_ptr(), data.len())
+        }
+        pub fn udp_send(&self, host: &str, port: u16, data: &[u8]) {
+            let h = host_v2();
+            (h.net_udp_send)(
+                h.ctx,
+                self.0,
+                cstring(host).as_ptr(),
+                port,
+                data.as_ptr(),
+                data.len(),
+            )
+        }
+        pub fn close(&self) {
+            let h = host_v2();
+            (h.net_close)(h.ctx, self.0)
+        }
+    }
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub enum Kind {
+        /// Connected, listening, or UDP socket open; `text` is the address.
+        Connected,
+        /// `data` arrived; for UDP, `text` is the sender.
+        Data,
+        Closed,
+        /// `text` says why, including refused permissions.
+        Error,
+        /// A listener accepted `new_handle`; `text` is the peer.
+        Accepted,
+        /// A fetch finished: `status`, headers in `text`, body in `data`.
+        Response,
+    }
+
+    #[derive(Debug, Clone, Copy)]
+    pub struct NetEvent<'a> {
+        pub kind: Kind,
+        pub handle: Handle,
+        pub new_handle: Option<Handle>,
+        pub status: u32,
+        pub data: &'a [u8],
+        pub text: &'a str,
+    }
 }
 
 /// An ordered list of shapes. Later layouts draw on top.
@@ -175,6 +279,8 @@ pub trait Page: Default + 'static {
     /// Called every display frame while animating; `dt` in seconds.
     fn update(&mut self, _window: &Window, _dt: f64) {}
     fn pointer(&mut self, _window: &Window, _ev: &PointerEvent) {}
+    /// A network event for a handle from [`net`].
+    fn net(&mut self, _window: &Window, _ev: &net::NetEvent) {}
     /// Draw with raw cairo on top of the layouts, in logical pixels.
     #[cfg(feature = "cairo")]
     fn draw(&mut self, _window: &Window, _cr: &cairo::Context, _width: f64, _height: f64) {}
@@ -255,6 +361,40 @@ pub mod __private {
         with(slot, |p, w| p.draw(w, &cr, width, height));
     }
 
+    pub unsafe fn net<P: Page>(slot: &'static Slot<P>, ev: *const underweb_abi::UwNetEvent) {
+        use underweb_abi::*;
+        let ev = unsafe { *ev };
+        let kind = match ev.kind {
+            UW_NET_CONNECTED => net::Kind::Connected,
+            UW_NET_DATA => net::Kind::Data,
+            UW_NET_CLOSED => net::Kind::Closed,
+            UW_NET_ACCEPTED => net::Kind::Accepted,
+            UW_NET_RESPONSE => net::Kind::Response,
+            _ => net::Kind::Error,
+        };
+        let data = if ev.data.is_null() || ev.len == 0 {
+            &[][..]
+        } else {
+            unsafe { std::slice::from_raw_parts(ev.data, ev.len) }
+        };
+        let text = if ev.text.is_null() {
+            String::new()
+        } else {
+            unsafe { CStr::from_ptr(ev.text) }
+                .to_string_lossy()
+                .into_owned()
+        };
+        let e = net::NetEvent {
+            kind,
+            handle: net::Handle(ev.handle),
+            new_handle: (ev.new_handle != 0).then_some(net::Handle(ev.new_handle)),
+            status: ev.status,
+            data,
+            text: &text,
+        };
+        with(slot, |p, w| p.net(w, &e));
+    }
+
     pub unsafe fn deactivate<P: Page>(slot: &'static Slot<P>) {
         with(slot, |p, w| p.deactivate(w));
         guard(|| slot.with(|p| *p.borrow_mut() = None));
@@ -287,6 +427,13 @@ macro_rules! export_page {
             ev: *const $crate::abi::UwPointerEvent,
         ) {
             unsafe { $crate::__private::pointer::<$page>(&__UW_PAGE, ev) }
+        }
+        #[unsafe(no_mangle)]
+        pub unsafe extern "C" fn uw_net(
+            _host: *const $crate::abi::UwHost,
+            ev: *const $crate::abi::UwNetEvent,
+        ) {
+            unsafe { $crate::__private::net::<$page>(&__UW_PAGE, ev) }
         }
         $crate::__export_draw!($page, __UW_PAGE);
         #[unsafe(no_mangle)]

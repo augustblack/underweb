@@ -8,7 +8,7 @@ sandboxed process.
 This is a Rust rewrite of the 2011 Vala project. See
 [docs/ROADMAP.md](docs/ROADMAP.md) for the design and phases.
 
-## Status: phases 0–2
+## Status: phases 0–3
 
 Working on macOS:
 
@@ -33,10 +33,16 @@ Working on macOS:
   can run compilers but can't reach the network or your files
 - `uw`, a command-line tool for authors: `build`, `publish`, `serve`
 - the engine as a C library (`include/underweb_engine.h`)
+- networking through a permission broker: packages declare what they need
+  in `[permissions]` (TCP connect/listen, UDP bind/send, fetch URL
+  prefixes); the browser asks the user ("Allow once / Always allow /
+  Deny") and does the I/O itself, so package processes still can't open a
+  socket. "Always" is remembered per package origin; the Permissions panel
+  shows and forgets decisions.
+- private storage per package (`storage` in JS/TS, `data_dir()` for native)
 
-Not yet: signatures (with trust, phase 4); permissions and networking (3);
-CEF web pages (5); audio and Pd (6); video (7); the layout editor (8);
-Windows (9). Until phase 4, a package is only as trustworthy as the HTTPS
+Not yet: signatures and trust (phase 4); CEF web pages (5); audio and Pd
+(6); video (7); the layout editor (8); Windows (9). Until phase 4, a package is only as trustworthy as the HTTPS
 site serving its index.
 
 ## Build and run
@@ -102,6 +108,29 @@ export function activate() {
 export function update(dt: number) {}   // every frame while window.animating
 export function pointer(ev) {}          // ev.shape is the shape under the pointer
 ```
+
+Network access needs a declaration, and the user's OK:
+
+```toml
+[permissions]
+net.tcp.connect = ["example.org:7000", "*.example.org:443"]
+net.tcp.listen  = [9000]
+net.udp.bind    = [57120]
+net.udp.send    = ["192.168.1.20:57110", "*:9000"]
+fetch           = ["https://api.example.org/v1/"]
+```
+
+```ts
+import { net, storage } from "underweb";
+const c = await net.connect("example.org", 7000);   // rejects if refused
+c.ondata = (bytes) => { /* … */ };
+c.send("hello");
+const r = await net.fetch("https://api.example.org/v1/items");
+storage.set("last", await r.text());
+```
+
+`examples/hello-net` asks to fetch from GitHub. `--allow-declared` grants
+declared permissions without asking (development).
 
 See `examples/` for the same idea in Rust (the `underweb` crate and
 `export_page!`) and in C.

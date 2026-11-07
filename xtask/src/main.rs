@@ -10,7 +10,7 @@ use std::process::Command;
 
 use anyhow::{Context, Result, bail};
 
-const NATIVE_RUST_EXAMPLES: &[&str] = &["hello-rust", "probe-rust"];
+const NATIVE_RUST_EXAMPLES: &[&str] = &["hello-rust", "probe-rust", "probe-net-rust"];
 const NATIVE_C_EXAMPLES: &[&str] = &["hello-c"];
 
 fn main() -> Result<()> {

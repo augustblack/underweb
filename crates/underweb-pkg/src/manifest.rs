@@ -19,7 +19,7 @@
 //! # js/ts packages
 //! # entry = "main.ts"
 //!
-//! [permissions]            # declared now, enforced from phase 3
+//! [permissions]            # see permissions.rs
 //! net.tcp.connect = ["example.org:7000"]
 //! ```
 //!
@@ -85,7 +85,7 @@ pub struct Manifest {
     #[serde(default)]
     pub build: Build,
     #[serde(default)]
-    pub permissions: toml::Table,
+    pub permissions: crate::Permissions,
 }
 
 /// A package directory with a parsed manifest.
@@ -128,6 +128,7 @@ impl Package {
         for f in &self.manifest.build.sources {
             relative(f)?;
         }
+        self.manifest.permissions.validate()?;
         if !valid_name(&p.name) {
             bail!(
                 "package name {:?}: use lowercase letters, digits, - and _",

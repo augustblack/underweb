@@ -2,7 +2,8 @@
 // Packages import it as `import { Layout, Shape, window } from "underweb"`.
 // Types: sdk/js/underweb.d.ts.
 
-const ops = Deno.core.ops;
+const core = Deno.core;
+const ops = core.ops;
 
 const shapes = new Map();
 
@@ -50,6 +51,144 @@ const window = {
   log(...args) { ops.op_uw_log(args.map(String).join(" ")); },
 };
 
+// ---- network ------------------------------------------------------------
+// Every request goes to the browser, which checks it against the
+// permissions in underweb.toml and asks the user. Requests resolve or
+// reject when the browser answers.
+
+const bytes = (d) =>
+  d instanceof Uint8Array ? d : typeof d === "string" ? core.encode(d) : new Uint8Array(d);
+
+const pending = new Map(); // handle -> { resolve, reject }
+const handles = new Map(); // handle -> Connection | Listener | UdpSocket
+
+function waitFor(handle, value) {
+  handles.set(handle, value);
+  return new Promise((resolve, reject) => {
+    pending.set(handle, { resolve: (v) => resolve(v ?? value), reject });
+  });
+}
+
+class Connection {
+  constructor(handle, peer = "") {
+    this.handle = handle;
+    this.peer = peer;
+    this.ondata = null; // (bytes: Uint8Array) => void
+    this.onclose = null;
+    this.onerror = null;
+  }
+  send(data) { ops.op_uw_net_send(this.handle, bytes(data)); }
+  close() { ops.op_uw_net_close(this.handle); handles.delete(this.handle); }
+}
+
+class Listener {
+  constructor(handle) {
+    this.handle = handle;
+    this.onconnection = null; // (conn: Connection) => void
+  }
+  close() { ops.op_uw_net_close(this.handle); handles.delete(this.handle); }
+}
+
+class UdpSocket {
+  constructor(handle) {
+    this.handle = handle;
+    this.address = "";
+    this.ondata = null; // (bytes, from: "ip:port") => void
+    this.onerror = null;
+  }
+  send(host, port, data) { ops.op_uw_net_udp_send(this.handle, String(host), port, bytes(data)); }
+  close() { ops.op_uw_net_close(this.handle); handles.delete(this.handle); }
+}
+
+class Response {
+  constructor(status, headerText, body) {
+    this.status = status;
+    this.ok = status >= 200 && status < 300;
+    this.headers = {};
+    for (const line of headerText.split("\n")) {
+      const i = line.indexOf(":");
+      if (i > 0) this.headers[line.slice(0, i).trim().toLowerCase()] = line.slice(i + 1).trim();
+    }
+    this.body = body;
+  }
+  bytes() { return Promise.resolve(this.body); }
+  text() { return Promise.resolve(core.decode(this.body)); }
+  async json() { return JSON.parse(await this.text()); }
+}
+
+const net = {
+  /** Open a TCP connection. */
+  connect(host, port) {
+    const h = ops.op_uw_net_tcp_connect(String(host), port);
+    return waitFor(h, new Connection(h));
+  },
+  /** Accept TCP connections on `port`. */
+  listen(port) {
+    const h = ops.op_uw_net_tcp_listen(port);
+    return waitFor(h, new Listener(h));
+  },
+  /** A UDP socket on `port`, or an ephemeral port for sending (0). */
+  udp(port = 0) {
+    const h = ops.op_uw_net_udp_open(port);
+    return waitFor(h, new UdpSocket(h));
+  },
+  /** HTTP(S) request; resolves to a Response. Redirects are not followed. */
+  fetch(url, { method = "GET", headers = {}, body = "" } = {}) {
+    const h = ops.op_uw_fetch(method, String(url), Object.entries(headers).map(([k, v]) => [k, String(v)]), bytes(body));
+    return new Promise((resolve, reject) => pending.set(h, { resolve, reject }));
+  },
+};
+
+function netEvents() {
+  let ev;
+  while ((ev = ops.op_uw_net_next()) !== null) {
+    const data = ops.op_uw_net_data();
+    const obj = handles.get(ev.handle);
+    const wait = pending.get(ev.handle);
+    switch (ev.kind) {
+      case "connected":
+        if (obj instanceof UdpSocket) obj.address = ev.text;
+        if (obj instanceof Connection) obj.peer = ev.text;
+        if (wait) { pending.delete(ev.handle); wait.resolve(); }
+        break;
+      case "response":
+        if (wait) { pending.delete(ev.handle); wait.resolve(new Response(ev.status, ev.text, data)); }
+        break;
+      case "error":
+        if (wait) {
+          pending.delete(ev.handle);
+          handles.delete(ev.handle);
+          wait.reject(new Error(ev.text));
+        } else {
+          obj?.onerror?.(new Error(ev.text));
+        }
+        break;
+      case "data":
+        obj?.ondata?.(data, ev.text);
+        break;
+      case "closed":
+        handles.delete(ev.handle);
+        obj?.onclose?.();
+        break;
+      case "accepted": {
+        const conn = new Connection(ev.new_handle, ev.text);
+        handles.set(ev.new_handle, conn);
+        obj?.onconnection?.(conn);
+        break;
+      }
+    }
+  }
+}
+
+// ---- storage: strings kept in the package's private directory -----------
+
+const storage = {
+  get: (key) => ops.op_uw_storage_get(String(key)),
+  set: (key, value) => ops.op_uw_storage_set(String(key), String(value)),
+  remove: (key) => ops.op_uw_storage_remove(String(key)),
+  keys: () => ops.op_uw_storage_keys(),
+};
+
 globalThis.console = {
   log: window.log,
   info: window.log,
@@ -68,7 +207,14 @@ function dispatch(name, arg) {
   fn(arg);
 }
 
-const api = { Layout, Shape, window, dispatch };
+// an unhandled rejection (say, a refused permission nobody caught) is
+// logged instead of stopping the page
+core.setUnhandledPromiseRejectionHandler((_promise, reason) => {
+  window.log("uncaught (in promise):", reason?.message ?? reason);
+  return true;
+});
+
+const api = { Layout, Shape, window, net, storage, dispatch, netEvents };
 Object.defineProperty(globalThis, "__uw", { value: api });
 
 // Packages get no Deno internals: only the API above.

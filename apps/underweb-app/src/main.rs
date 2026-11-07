@@ -2,8 +2,11 @@
 //! process per open package.
 //!
 //! ```text
-//! underweb [--no-sandbox] [ADDRESS...]
+//! underweb [--no-sandbox] [--allow-declared] [ADDRESS...]
 //! ```
+//!
+//! `--allow-declared` grants every permission a package declares without
+//! asking (development and kiosks).
 //!
 //! An address is `uw://<domain>/<name>[@version]` or a package directory
 //! (or `file://` URL), optionally with `?key=value&...` parameters for the
@@ -31,6 +34,8 @@ struct App {
     address: String,
     sandbox: bool,
     show_log: bool,
+    show_permissions: bool,
+    allow_declared: bool,
     snapshot: Option<Snapshot>,
 }
 
@@ -68,6 +73,8 @@ impl App {
             active: 0,
             sandbox,
             show_log: false,
+            show_permissions: false,
+            allow_declared: false,
             snapshot,
         }
     }
@@ -116,11 +123,12 @@ impl App {
             let edit = ui.add(
                 egui::TextEdit::singleline(&mut self.address)
                     .hint_text("uw://example.org/package, or a package directory")
-                    .desired_width(ui.available_width() - 60.0),
+                    .desired_width(ui.available_width() - 160.0),
             );
             if edit.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
                 self.tabs[self.active].navigate(self.address.trim().to_string());
             }
+            ui.toggle_value(&mut self.show_permissions, "Permissions");
             ui.toggle_value(&mut self.show_log, "Log");
         });
     }
@@ -160,12 +168,19 @@ impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         for tab in &mut self.tabs {
             tab.sandbox = self.sandbox;
+            tab.allow_declared = self.allow_declared;
             tab.poll(ctx, &self.store);
         }
         egui::TopBottomPanel::top("chrome").show(ctx, |ui| {
             self.tab_bar(ui);
             self.address_bar(ui);
         });
+        self.tabs[self.active].prompt_bar(ctx);
+        if self.show_permissions {
+            egui::TopBottomPanel::bottom("permissions").show(ctx, |ui| {
+                self.tabs[self.active].permissions_ui(ui);
+            });
+        }
         if self.show_log {
             egui::TopBottomPanel::bottom("log")
                 .resizable(true)
@@ -208,12 +223,14 @@ fn write_png(path: &std::path::Path, image: &egui::ColorImage) -> anyhow::Result
 
 fn main() -> eframe::Result<()> {
     let mut sandbox = std::env::var_os("UNDERWEB_NO_SANDBOX").is_none();
+    let mut allow_declared = false;
     let mut addresses = Vec::new();
     for a in std::env::args().skip(1) {
         match a.as_str() {
             "--no-sandbox" => sandbox = false,
+            "--allow-declared" => allow_declared = true,
             "-h" | "--help" => {
-                println!("usage: underweb [--no-sandbox] [ADDRESS...]");
+                println!("usage: underweb [--no-sandbox] [--allow-declared] [ADDRESS...]");
                 return Ok(());
             }
             _ => addresses.push(a),
@@ -228,6 +245,10 @@ fn main() -> eframe::Result<()> {
     eframe::run_native(
         "Underweb",
         options,
-        Box::new(move |_cc| Ok(Box::new(App::new(addresses, sandbox)))),
+        Box::new(move |_cc| {
+            let mut app = App::new(addresses, sandbox);
+            app.allow_declared = allow_declared;
+            Ok(Box::new(app))
+        }),
     )
 }

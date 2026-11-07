@@ -1,0 +1,21 @@
+[package]
+name = "probe-net-rust"
+version = "0.1.0"
+kind = "rust"
+description = "Network/storage test for native packages. The tests rewrite [permissions]."
+
+[targets.aarch64-apple-darwin]
+file = "dist/aarch64-apple-darwin/libprobe_net_rust.dylib"
+
+[targets.x86_64-apple-darwin]
+file = "dist/x86_64-apple-darwin/libprobe_net_rust.dylib"
+
+[targets.x86_64-unknown-linux-gnu]
+file = "dist/x86_64-unknown-linux-gnu/libprobe_net_rust.so"
+
+[targets.aarch64-unknown-linux-gnu]
+file = "dist/aarch64-unknown-linux-gnu/libprobe_net_rust.so"
+
+[permissions]
+net.tcp.connect = ["127.0.0.1:7"]
+net.tcp.listen = [7]

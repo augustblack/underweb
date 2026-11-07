@@ -7,7 +7,8 @@
 //! (not type-checked) with deno_ast.
 
 use std::cell::RefCell;
-use std::path::PathBuf;
+use std::collections::VecDeque;
+use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
 use anyhow::{Context, Result, anyhow};
@@ -21,9 +22,10 @@ use deno_core::{
 use deno_error::JsErrorBox;
 use underweb_abi::UwPointerEvent;
 use underweb_guest::{PathOp, Rgba, Scene, Shape};
-use underweb_ipc::{Channel, GuestMsg};
+use underweb_ipc::{Channel, GuestMsg, NetEvent, NetEventKind, NetOp};
 use underweb_pkg::Package;
 
+use crate::net::Net;
 use crate::page::Page;
 
 const API_SPECIFIER: &str = "underweb:api";
@@ -149,6 +151,181 @@ fn op_uw_shape_set_font(state: &mut OpState, id: u32, #[string] font: &str) {
     with_shape(state, id, |s| s.font = font.to_string())
 }
 
+// ---- network: requests go to the host's broker -------------------------
+
+/// Events waiting for JS, and the payload of the one being delivered.
+#[derive(Default)]
+struct NetInbox {
+    queue: VecDeque<NetEvent>,
+    data: Vec<u8>,
+}
+
+#[derive(serde::Serialize)]
+struct JsNetEvent {
+    handle: u32,
+    kind: &'static str,
+    text: String,
+    status: u32,
+    new_handle: u32,
+}
+
+fn net(state: &OpState) -> &Net {
+    state.borrow::<Net>()
+}
+
+#[op2(fast)]
+fn op_uw_net_tcp_connect(state: &mut OpState, #[string] host: String, port: u32) -> u32 {
+    net(state).open(NetOp::TcpConnect {
+        host,
+        port: port as u16,
+    })
+}
+#[op2(fast)]
+fn op_uw_net_tcp_listen(state: &mut OpState, port: u32) -> u32 {
+    net(state).open(NetOp::TcpListen { port: port as u16 })
+}
+#[op2(fast)]
+fn op_uw_net_udp_open(state: &mut OpState, port: u32) -> u32 {
+    net(state).open(NetOp::UdpOpen { port: port as u16 })
+}
+#[op2(fast)]
+fn op_uw_net_send(state: &mut OpState, handle: u32, #[buffer] data: &[u8]) {
+    net(state).on(
+        handle,
+        NetOp::Send {
+            data: data.to_vec(),
+        },
+    )
+}
+#[op2(fast)]
+fn op_uw_net_udp_send(
+    state: &mut OpState,
+    handle: u32,
+    #[string] host: String,
+    port: u32,
+    #[buffer] data: &[u8],
+) {
+    net(state).on(
+        handle,
+        NetOp::UdpSend {
+            host,
+            port: port as u16,
+            data: data.to_vec(),
+        },
+    )
+}
+#[op2(fast)]
+fn op_uw_net_close(state: &mut OpState, handle: u32) {
+    net(state).on(handle, NetOp::Close)
+}
+#[op2]
+fn op_uw_fetch(
+    state: &mut OpState,
+    #[string] method: String,
+    #[string] url: String,
+    #[serde] headers: Vec<(String, String)>,
+    #[buffer] body: &[u8],
+) -> u32 {
+    net(state).open(NetOp::Fetch {
+        method,
+        url,
+        headers,
+        body: body.to_vec(),
+    })
+}
+/// The next queued event (its bytes go to `op_uw_net_data`), or null.
+#[op2]
+#[serde]
+fn op_uw_net_next(state: &mut OpState) -> Option<JsNetEvent> {
+    let inbox = state.borrow_mut::<NetInbox>();
+    let ev = inbox.queue.pop_front()?;
+    inbox.data = ev.data;
+    let kind = match ev.kind {
+        NetEventKind::Connected => "connected",
+        NetEventKind::Data => "data",
+        NetEventKind::Closed => "closed",
+        NetEventKind::Error => "error",
+        NetEventKind::Accepted => "accepted",
+        NetEventKind::Response => "response",
+    };
+    Some(JsNetEvent {
+        handle: ev.handle,
+        kind,
+        text: ev.text,
+        status: ev.status,
+        new_handle: ev.new_handle,
+    })
+}
+#[op2]
+#[buffer]
+fn op_uw_net_data(state: &mut OpState) -> Vec<u8> {
+    std::mem::take(&mut state.borrow_mut::<NetInbox>().data)
+}
+
+// ---- storage: small key/value files in the package's data directory ----
+
+struct DataDir(PathBuf);
+
+const MAX_KEY: usize = 200;
+const MAX_VALUE: usize = 16 << 20;
+
+fn key_path(state: &OpState, key: &str) -> Result<PathBuf, JsErrorBox> {
+    if key.is_empty() || key.len() > MAX_KEY {
+        return Err(JsErrorBox::type_error(format!(
+            "storage keys are 1 to {MAX_KEY} bytes"
+        )));
+    }
+    let name: String = key.bytes().map(|b| format!("{b:02x}")).collect();
+    Ok(state.borrow::<DataDir>().0.join("storage").join(name))
+}
+
+#[op2]
+#[string]
+fn op_uw_storage_get(
+    state: &mut OpState,
+    #[string] key: &str,
+) -> Result<Option<String>, JsErrorBox> {
+    Ok(std::fs::read_to_string(key_path(state, key)?).ok())
+}
+#[op2(fast)]
+fn op_uw_storage_set(
+    state: &mut OpState,
+    #[string] key: &str,
+    #[string] value: &str,
+) -> Result<(), JsErrorBox> {
+    if value.len() > MAX_VALUE {
+        return Err(JsErrorBox::range_error("storage values are at most 16 MB"));
+    }
+    let path = key_path(state, key)?;
+    std::fs::create_dir_all(path.parent().unwrap()).map_err(JsErrorBox::from_err)?;
+    std::fs::write(path, value).map_err(JsErrorBox::from_err)
+}
+#[op2(fast)]
+fn op_uw_storage_remove(state: &mut OpState, #[string] key: &str) -> Result<(), JsErrorBox> {
+    let _ = std::fs::remove_file(key_path(state, key)?);
+    Ok(())
+}
+#[op2]
+#[serde]
+fn op_uw_storage_keys(state: &mut OpState) -> Vec<String> {
+    let dir = state.borrow::<DataDir>().0.join("storage");
+    let mut keys: Vec<String> = std::fs::read_dir(dir)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter_map(|e| {
+            let hex = e.file_name().into_string().ok()?;
+            let bytes: Option<Vec<u8>> = (0..hex.len())
+                .step_by(2)
+                .map(|i| u8::from_str_radix(hex.get(i..i + 2)?, 16).ok())
+                .collect();
+            String::from_utf8(bytes?).ok()
+        })
+        .collect();
+    keys.sort();
+    keys
+}
+
 deno_core::extension!(
     underweb,
     ops = [
@@ -159,13 +336,19 @@ deno_core::extension!(
         op_uw_shape_line_to, op_uw_shape_curve_to, op_uw_shape_close_path,
         op_uw_shape_set_fill_color, op_uw_shape_set_stroke_color, op_uw_shape_set_stroke_width,
         op_uw_shape_set_text, op_uw_shape_set_text_color, op_uw_shape_set_font,
+        op_uw_net_tcp_connect, op_uw_net_tcp_listen, op_uw_net_udp_open, op_uw_net_send,
+        op_uw_net_udp_send, op_uw_net_close, op_uw_fetch, op_uw_net_next, op_uw_net_data,
+        op_uw_storage_get, op_uw_storage_set, op_uw_storage_remove, op_uw_storage_keys,
     ],
     esm_entry_point = "ext:underweb/underweb.js",
     esm = [dir "js", "underweb.js"],
-    options = { scene: SharedScene },
+    options = { scene: SharedScene, net: Net, data_dir: PathBuf },
     state = |state, options| {
         state.put::<SharedScene>(options.scene);
         state.put(Logs::default());
+        state.put(options.net);
+        state.put(NetInbox::default());
+        state.put(DataDir(options.data_dir));
     },
 );
 
@@ -201,7 +384,7 @@ impl PackageLoader {
     fn load_sync(&self, specifier: &ModuleSpecifier) -> Result<ModuleSource, ModuleLoaderError> {
         if specifier.as_str() == API_SPECIFIER {
             let code = "const u = globalThis.__uw;\n\
-                        export const Layout = u.Layout, Shape = u.Shape, window = u.window;\n";
+                        export const Layout = u.Layout, Shape = u.Shape, window = u.window, net = u.net, storage = u.storage;\n";
             return Ok(ModuleSource::new(
                 ModuleType::JavaScript,
                 ModuleSourceCode::String(code.to_string().into()),
@@ -271,7 +454,7 @@ pub struct JsPage {
 
 impl JsPage {
     /// Creates the V8 isolate. Runs before lockdown; loads no package code.
-    pub fn new(pkg: &Package, scene: SharedScene, chan: &Channel) -> Result<JsPage> {
+    pub fn new(pkg: &Package, scene: SharedScene, chan: &Channel, data: &Path) -> Result<JsPage> {
         let entry = pkg.entry_path().context("no entry")?;
         let entry =
             ModuleSpecifier::from_file_path(&entry).map_err(|_| anyhow!("bad entry path"))?;
@@ -279,7 +462,7 @@ impl JsPage {
             module_loader: Some(Rc::new(PackageLoader {
                 root: pkg.dir.clone(),
             })),
-            extensions: vec![underweb::init(scene)],
+            extensions: vec![underweb::init(scene, Net::new(chan), data.to_path_buf())],
             ..Default::default()
         });
         let tokio = tokio::runtime::Builder::new_current_thread().build()?;
@@ -352,6 +535,24 @@ impl Page for JsPage {
             ev.button, ev.x, ev.y, ev.shape
         );
         self.dispatch("pointer", &arg)
+    }
+
+    fn net(&mut self, ev: NetEvent) -> Result<()> {
+        self.runtime
+            .op_state()
+            .borrow_mut()
+            .borrow_mut::<NetInbox>()
+            .queue
+            .push_back(ev);
+        let result = self
+            .runtime
+            .execute_script("<underweb>", "globalThis.__uw.netEvents()");
+        self.flush_logs();
+        result.map_err(|e| anyhow!("{e}"))?;
+        let rt = &mut self.runtime;
+        self.tokio.block_on(rt.run_event_loop(Default::default()))?;
+        self.flush_logs();
+        Ok(())
     }
 
     fn deactivate(&mut self) {

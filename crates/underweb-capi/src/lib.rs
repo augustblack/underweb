@@ -18,7 +18,7 @@
 use std::ffi::{CStr, CString, c_char};
 use std::time::Duration;
 
-use underweb_core::{Guest, GuestEvent, SpawnOptions, Store};
+use underweb_core::{Decision, Guest, GuestEvent, SpawnOptions, Store};
 
 pub const UW_EVENT_STARTED: u32 = 1;
 pub const UW_EVENT_TITLE: u32 = 2;
@@ -27,6 +27,13 @@ pub const UW_EVENT_ANIMATING: u32 = 4;
 pub const UW_EVENT_LOG: u32 = 5;
 pub const UW_EVENT_ERROR: u32 = 6;
 pub const UW_EVENT_EXITED: u32 = 7;
+/// The package wants a permission it declared; `text` describes it. Answer
+/// with `uw_engine_answer(e, ev.permission_id, UW_DECISION_*)`.
+pub const UW_EVENT_PERMISSION: u32 = 8;
+
+pub const UW_DECISION_DENY: u32 = 0;
+pub const UW_DECISION_ALLOW_ONCE: u32 = 1;
+pub const UW_DECISION_ALLOW_ALWAYS: u32 = 2;
 
 /// One event. Pointers stay valid until the next call on the engine.
 #[repr(C)]
@@ -39,8 +46,10 @@ pub struct UwEngineEvent {
     pub width: u32,
     pub height: u32,
     pub rgba: *const u8,
-    /// TITLE, LOG, ERROR: the text.
+    /// TITLE, LOG, ERROR, PERMISSION: the text.
     pub text: *const c_char,
+    /// PERMISSION: pass to `uw_engine_answer`.
+    pub permission_id: u64,
 }
 
 /// An open package.
@@ -189,6 +198,7 @@ pub unsafe extern "C" fn uw_engine_next_event(
         height: 0,
         rgba: std::ptr::null(),
         text: std::ptr::null(),
+        permission_id: 0,
     };
     let mut text = |s: String| {
         e.text = CString::new(s.replace('\0', "")).unwrap_or_default();
@@ -216,6 +226,13 @@ pub unsafe extern "C" fn uw_engine_next_event(
             out.flag = on;
         }
         GuestEvent::Exited(_) => out.kind = UW_EVENT_EXITED,
+        GuestEvent::PermissionRequest {
+            id, description, ..
+        } => {
+            out.kind = UW_EVENT_PERMISSION;
+            out.permission_id = id;
+            out.text = text(description);
+        }
         GuestEvent::Frame(f) => {
             out.kind = UW_EVENT_FRAME;
             out.width = f.width;
@@ -225,6 +242,23 @@ pub unsafe extern "C" fn uw_engine_next_event(
         }
     }
     true
+}
+
+/// Answer a `UW_EVENT_PERMISSION` with a `UW_DECISION_*`.
+///
+/// # Safety
+/// As for `uw_engine_configure`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn uw_engine_answer(e: *mut UwEngine, permission_id: u64, decision: u32) {
+    let Some(e) = (unsafe { e.as_mut() }) else {
+        return;
+    };
+    let d = match decision {
+        UW_DECISION_ALLOW_ONCE => Decision::AllowOnce,
+        UW_DECISION_ALLOW_ALWAYS => Decision::AllowAlways,
+        _ => Decision::Deny,
+    };
+    e.guest.answer(permission_id, d);
 }
 
 /// Stop the package and free the engine.

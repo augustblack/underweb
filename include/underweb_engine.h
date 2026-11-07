@@ -21,6 +21,16 @@
 
 #define UW_EVENT_EXITED 7
 
+// The package wants a permission it declared; `text` describes it. Answer
+// with `uw_engine_answer(e, ev.permission_id, UW_DECISION_*)`.
+#define UW_EVENT_PERMISSION 8
+
+#define UW_DECISION_DENY 0
+
+#define UW_DECISION_ALLOW_ONCE 1
+
+#define UW_DECISION_ALLOW_ALWAYS 2
+
 // An open package.
 typedef struct UwEngine UwEngine;
 
@@ -34,8 +44,10 @@ typedef struct UwEngineEvent {
   uint32_t width;
   uint32_t height;
   const uint8_t *rgba;
-  // TITLE, LOG, ERROR: the text.
+  // TITLE, LOG, ERROR, PERMISSION: the text.
   const char *text;
+  // PERMISSION: pass to `uw_engine_answer`.
+  uint64_t permission_id;
 } UwEngineEvent;
 
 // Resolve an address (downloading and building if needed; this can take
@@ -71,6 +83,12 @@ int32_t uw_engine_tick(struct UwEngine *e, double dt);
 // # Safety
 // As for `uw_engine_configure`; `out` must be writable.
 bool uw_engine_next_event(struct UwEngine *e, uint32_t timeout_ms, struct UwEngineEvent *out);
+
+// Answer a `UW_EVENT_PERMISSION` with a `UW_DECISION_*`.
+//
+// # Safety
+// As for `uw_engine_configure`.
+void uw_engine_answer(struct UwEngine *e, uint64_t permission_id, uint32_t decision);
 
 // Stop the package and free the engine.
 //

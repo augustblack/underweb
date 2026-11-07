@@ -3698,6 +3698,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "probe-net-rust"
+version = "0.1.0"
+dependencies = [
+ "underweb",
+]
+
+[[package]]
 name = "probe-rust"
 version = "0.1.0"
 dependencies = [
@@ -5333,6 +5340,7 @@ dependencies = [
  "deno_core",
  "deno_error",
  "libloading 0.9.0",
+ "serde",
  "tokio",
  "underweb-abi",
  "underweb-guest",

@@ -12,12 +12,14 @@ mod address;
 mod archive;
 mod index;
 mod manifest;
+mod permissions;
 mod publish;
 
 pub use address::{Address, Parsed, parse_address};
 pub use archive::{Limits, collect_files, hash, pack, unpack};
 pub use index::{Artifact, Index, Release};
 pub use manifest::*;
+pub use permissions::{Permission, Permissions};
 pub use publish::{
     PublishOptions, index_path, publish, publishable_cargo_toml, source_files, target_files,
 };

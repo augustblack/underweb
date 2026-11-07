@@ -131,7 +131,7 @@ Trust doesn't depend on any one network. The UI never shows protocol words like 
    - The macOS sandbox profile, plus Linux landlock and seccomp built in CI.
    - Packages load from a local directory with a manifest; no signing yet.
 2. **Packages.** Archives, cache, `uw://` resolution, prebuilt targets, the sandboxed source builder, and the C embedding API. *Done.* `uw://<domain>/<name>` resolves to `https://<domain>/.well-known/underweb/<name>.toml`, so ATProto handles (which are domains) fit in phase 4 without changing addresses. C builds use the system compiler, not a bundled zig yet.
-3. **Permissions.** The broker, fd-passed TCP/UDP, fetch, storage, and prompts.
+3. **Permissions.** The broker, fd-passed TCP/UDP, fetch, storage, and prompts. *Done, with one change:* the host keeps the sockets and relays data instead of passing fds, so UDP destinations are checked per packet, the runner sandbox stays free of network rules, and the same code will work on Windows. Fetch doesn't follow redirects (they could leave the allowed prefix).
 4. **Trust.** The statement format, local verification, the policy engine and the trust panel, then the ATProto adapter (login, records, follows, labelers). The signed-list adapter follows, as a way to test the adapter trait.
 5. **CEF.** CEF tabs with offscreen compositing and the macOS bundle.
 6. **Audio and Pd.** The ring-buffer audio path, ugens, and libpd.

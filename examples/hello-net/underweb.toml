@@ -1,0 +1,9 @@
+[package]
+name = "hello-net"
+version = "0.1.0"
+kind = "ts"
+entry = "main.ts"
+description = "Asks to fetch from the web, then shows a line of GitHub zen."
+
+[permissions]
+fetch = ["https://api.github.com/zen"]

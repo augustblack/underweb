@@ -6,9 +6,10 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use underweb_ipc::{Channel, GuestMsg, HostMsg, Shm, argb32_stride};
-use underweb_pkg::Package;
+use underweb_pkg::{Package, Permission};
 
-use crate::paths::{data_dir, runner_path};
+use crate::broker::{Broker, Decision, GrantState, PermissionPolicy};
+use crate::paths::{data_dir, grants_file, runner_path};
 
 pub struct SpawnOptions {
     /// Turn the OS sandbox off (development only; the UI should say so).
@@ -20,6 +21,15 @@ pub struct SpawnOptions {
     /// Called from the reader thread whenever an event is queued, e.g. to
     /// wake the UI.
     pub wake: Option<Arc<dyn Fn() + Send + Sync>>,
+    /// Undecided permissions: ask (the default), grant or refuse.
+    pub permissions: PermissionPolicy,
+    /// Who the package is, for remembering grants: its origin (the index
+    /// URL for remote packages). Defaults to the package directory.
+    pub identity: Option<String>,
+    /// Where "always allow" grants are stored. `None` with
+    /// `remember_grants: false` keeps them in memory.
+    pub grants_dir: Option<PathBuf>,
+    pub remember_grants: bool,
 }
 
 impl Default for SpawnOptions {
@@ -29,6 +39,10 @@ impl Default for SpawnOptions {
             params: Vec::new(),
             data_dir: None,
             wake: None,
+            permissions: PermissionPolicy::Ask,
+            identity: None,
+            grants_dir: None,
+            remember_grants: true,
         }
     }
 }
@@ -59,6 +73,14 @@ pub enum GuestEvent {
     Error(String),
     /// The runner process is gone. `None` if killed by a signal.
     Exited(Option<i32>),
+    /// The package used a declared permission nobody has decided on yet.
+    /// Answer with [`Guest::answer`]; its request waits until then.
+    PermissionRequest {
+        id: u64,
+        permission: Permission,
+        /// "connect to example.org on port 7000"
+        description: String,
+    },
 }
 
 struct Buffers {
@@ -76,6 +98,7 @@ pub struct Guest {
     buffers: Arc<Mutex<Option<Buffers>>>,
     generation: u32,
     events: Receiver<GuestEvent>,
+    broker: Arc<Broker>,
 }
 
 impl Guest {
@@ -113,13 +136,29 @@ impl Guest {
         let chan = Arc::new(host_end);
         let buffers: Arc<Mutex<Option<Buffers>>> = Arc::new(Mutex::new(None));
         let (tx, events) = mpsc::channel();
+        let identity = opts
+            .identity
+            .clone()
+            .unwrap_or_else(|| package.dir.display().to_string());
+        let grants = opts
+            .remember_grants
+            .then(|| grants_file(opts.grants_dir.as_deref(), package.name(), &identity));
+        let broker = Broker::new(
+            chan.clone(),
+            package.manifest.permissions.clone(),
+            opts.permissions,
+            grants,
+            tx.clone(),
+            opts.wake.clone(),
+        );
         {
             let chan = chan.clone();
             let buffers = buffers.clone();
             let wake = opts.wake.clone();
+            let broker = broker.clone();
             std::thread::Builder::new()
                 .name(format!("guest {}", package.name()))
-                .spawn(move || read_loop(&chan, &buffers, &tx, wake.as_deref()))?;
+                .spawn(move || read_loop(&chan, &buffers, &broker, &tx, wake.as_deref()))?;
         }
         Ok(Guest {
             package,
@@ -128,6 +167,7 @@ impl Guest {
             buffers,
             generation: 0,
             events,
+            broker,
         })
     }
 
@@ -177,7 +217,24 @@ impl Guest {
         self.events.recv_timeout(timeout).ok()
     }
 
+    /// Answer a [`GuestEvent::PermissionRequest`].
+    pub fn answer(&self, id: u64, decision: Decision) {
+        self.broker.answer(id, decision)
+    }
+
+    /// The package's declared permissions and the decision on each.
+    pub fn permissions(&self) -> Vec<(Permission, GrantState)> {
+        self.broker.permissions()
+    }
+
+    /// Forget the decision on a permission; the package will be asked
+    /// again next time it uses it.
+    pub fn forget(&self, permission: &Permission) {
+        self.broker.forget(permission)
+    }
+
     pub fn shutdown(mut self) {
+        self.broker.close_all();
         let _ = self.chan.send(&HostMsg::Shutdown, None);
         for _ in 0..50 {
             if let Ok(Some(_)) = self.child.try_wait() {
@@ -192,6 +249,7 @@ impl Guest {
 
 impl Drop for Guest {
     fn drop(&mut self) {
+        self.broker.close_all();
         if let Ok(None) = self.child.try_wait() {
             let _ = self.chan.send(&HostMsg::Shutdown, None);
             std::thread::sleep(Duration::from_millis(20));
@@ -204,6 +262,7 @@ impl Drop for Guest {
 fn read_loop(
     chan: &Channel,
     buffers: &Mutex<Option<Buffers>>,
+    broker: &Arc<Broker>,
     tx: &mpsc::Sender<GuestEvent>,
     wake: Option<&(dyn Fn() + Send + Sync)>,
 ) {
@@ -228,6 +287,7 @@ fn read_loop(
             GuestMsg::Animating(on) => send(GuestEvent::Animating(on)),
             GuestMsg::Log(l) => send(GuestEvent::Log(l)),
             GuestMsg::Error(e) => send(GuestEvent::Error(e)),
+            GuestMsg::Net { handle, op } => broker.request(handle, op),
             GuestMsg::Frame { generation, index } => {
                 let frame = {
                     let guard = buffers.lock().unwrap();
@@ -247,6 +307,7 @@ fn read_loop(
     }
     // the reader can't wait() on the child; report the socket closing and
     // let the owner collect the status
+    broker.close_all();
     send(GuestEvent::Exited(None));
 }
 

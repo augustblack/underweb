@@ -10,8 +10,9 @@ use anyhow::{Context, Result, bail};
 use libloading::Library;
 use underweb_abi::*;
 use underweb_guest::{PathOp, Rgba, Scene, Shape, cairo};
-use underweb_ipc::{Channel, GuestMsg};
+use underweb_ipc::{Channel, GuestMsg, NetEvent, NetEventKind, NetOp};
 
+use crate::net::{Net, parse_headers};
 use crate::page::Page;
 
 struct Ctx {
@@ -20,6 +21,8 @@ struct Ctx {
     param: RefCell<Option<CString>>,
     /// Raw pointer to the channel, alive for the whole run.
     chan: *const Channel,
+    net: Net,
+    data_dir: CString,
 }
 
 pub struct NativePage {
@@ -30,20 +33,28 @@ pub struct NativePage {
     pointer: Option<UwPointerFn>,
     draw: Option<UwDrawFn>,
     deactivate: Option<UwDeactivateFn>,
+    net: Option<UwNetFn>,
     // last: unloading must happen after everything above
     _lib: Library,
 }
 
 impl NativePage {
-    pub fn load(path: &Path, scene: Rc<RefCell<Scene>>, chan: &Channel) -> Result<NativePage> {
+    pub fn load(
+        path: &Path,
+        scene: Rc<RefCell<Scene>>,
+        chan: &Channel,
+        data: &Path,
+    ) -> Result<NativePage> {
         let lib =
             unsafe { Library::new(path) }.with_context(|| format!("loading {}", path.display()))?;
         unsafe {
             let version: UwAbiVersionFn =
                 *lib.get(b"uw_abi_version\0").context("uw_abi_version")?;
             let v = version();
-            if v != UW_ABI_VERSION {
-                bail!("package built for ABI {v}, this runner speaks {UW_ABI_VERSION}");
+            if !(UW_ABI_MIN_VERSION..=UW_ABI_VERSION).contains(&v) {
+                bail!(
+                    "package built for ABI {v}; this runner supports {UW_ABI_MIN_VERSION} to {UW_ABI_VERSION}"
+                );
             }
             let activate: UwActivateFn = *lib.get(b"uw_activate\0").context("uw_activate")?;
             let update = lib.get::<UwUpdateFn>(b"uw_update\0").ok().map(|s| *s);
@@ -53,11 +64,14 @@ impl NativePage {
                 .get::<UwDeactivateFn>(b"uw_deactivate\0")
                 .ok()
                 .map(|s| *s);
+            let net = lib.get::<UwNetFn>(b"uw_net\0").ok().map(|s| *s);
 
             let mut ctx = Box::new(Ctx {
                 scene,
                 param: RefCell::new(None),
                 chan,
+                net: Net::new(chan),
+                data_dir: CString::new(data.to_string_lossy().as_bytes())?,
             });
             let host = Box::new(host_table(&mut *ctx as *mut Ctx as *mut c_void));
             Ok(NativePage {
@@ -68,6 +82,7 @@ impl NativePage {
                 pointer,
                 draw,
                 deactivate,
+                net,
                 _lib: lib,
             })
         }
@@ -91,6 +106,30 @@ impl Page for NativePage {
         if let Some(f) = self.pointer {
             unsafe { f(&*self.host, ev) };
         }
+        Ok(())
+    }
+
+    fn net(&mut self, ev: NetEvent) -> Result<()> {
+        let Some(f) = self.net else { return Ok(()) };
+        let kind = match ev.kind {
+            NetEventKind::Connected => UW_NET_CONNECTED,
+            NetEventKind::Data => UW_NET_DATA,
+            NetEventKind::Closed => UW_NET_CLOSED,
+            NetEventKind::Error => UW_NET_ERROR,
+            NetEventKind::Accepted => UW_NET_ACCEPTED,
+            NetEventKind::Response => UW_NET_RESPONSE,
+        };
+        let text = CString::new(ev.text.replace('\0', "")).unwrap_or_default();
+        let raw = UwNetEvent {
+            kind,
+            handle: ev.handle,
+            new_handle: ev.new_handle,
+            status: ev.status,
+            data: ev.data.as_ptr(),
+            len: ev.data.len(),
+            text: text.as_ptr(),
+        };
+        unsafe { f(&*self.host, &raw) };
         Ok(())
     }
 
@@ -225,6 +264,77 @@ extern "C" fn shape_set_font(p: *mut c_void, id: u32, f: *const c_char) {
     shape(p, id, |s| s.font = f)
 }
 
+fn bytes<'a>(data: *const u8, len: usize) -> &'a [u8] {
+    if data.is_null() || len == 0 {
+        &[]
+    } else {
+        unsafe { std::slice::from_raw_parts(data, len) }
+    }
+}
+extern "C" fn data_dir(p: *mut c_void) -> *const c_char {
+    ctx(p).data_dir.as_ptr()
+}
+extern "C" fn net_tcp_connect(p: *mut c_void, host: *const c_char, port: u16) -> u32 {
+    ctx(p).net.open(NetOp::TcpConnect {
+        host: string(host),
+        port,
+    })
+}
+extern "C" fn net_tcp_listen(p: *mut c_void, port: u16) -> u32 {
+    ctx(p).net.open(NetOp::TcpListen { port })
+}
+extern "C" fn net_udp_open(p: *mut c_void, port: u16) -> u32 {
+    ctx(p).net.open(NetOp::UdpOpen { port })
+}
+extern "C" fn net_send(p: *mut c_void, handle: u32, data: *const u8, len: usize) {
+    ctx(p).net.on(
+        handle,
+        NetOp::Send {
+            data: bytes(data, len).to_vec(),
+        },
+    )
+}
+extern "C" fn net_udp_send(
+    p: *mut c_void,
+    handle: u32,
+    host: *const c_char,
+    port: u16,
+    data: *const u8,
+    len: usize,
+) {
+    ctx(p).net.on(
+        handle,
+        NetOp::UdpSend {
+            host: string(host),
+            port,
+            data: bytes(data, len).to_vec(),
+        },
+    )
+}
+extern "C" fn net_close(p: *mut c_void, handle: u32) {
+    ctx(p).net.on(handle, NetOp::Close)
+}
+extern "C" fn fetch(
+    p: *mut c_void,
+    method: *const c_char,
+    url: *const c_char,
+    headers: *const c_char,
+    body: *const u8,
+    len: usize,
+) -> u32 {
+    let method = if method.is_null() {
+        "GET".to_string()
+    } else {
+        string(method)
+    };
+    ctx(p).net.open(NetOp::Fetch {
+        method,
+        url: string(url),
+        headers: parse_headers(&string(headers)),
+        body: bytes(body, len).to_vec(),
+    })
+}
+
 fn host_table(ctx: *mut c_void) -> UwHost {
     UwHost {
         abi_version: UW_ABI_VERSION,
@@ -252,5 +362,13 @@ fn host_table(ctx: *mut c_void) -> UwHost {
         shape_set_text,
         shape_set_text_color,
         shape_set_font,
+        data_dir,
+        net_tcp_connect,
+        net_tcp_listen,
+        net_udp_open,
+        net_send,
+        net_udp_send,
+        net_close,
+        fetch,
     }
 }

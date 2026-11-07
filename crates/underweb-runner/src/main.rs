@@ -12,6 +12,7 @@
 mod build;
 mod js;
 mod native;
+mod net;
 mod page;
 
 use std::cell::RefCell;
@@ -113,7 +114,7 @@ fn run(chan: &Channel, args: Args) -> Result<()> {
 
     match pkg.kind() {
         Kind::Js | Kind::Ts => {
-            let mut page = js::JsPage::new(&pkg, scene.clone(), chan)?;
+            let mut page = js::JsPage::new(&pkg, scene.clone(), chan, &args.data)?;
             lock(chan)?;
             page.load()?;
             page::run(chan, &scene, &mut page)
@@ -121,7 +122,7 @@ fn run(chan: &Channel, args: Args) -> Result<()> {
         Kind::Rust | Kind::C => {
             let lib = pkg.native_library()?;
             lock(chan)?;
-            let mut page = native::NativePage::load(&lib, scene.clone(), chan)?;
+            let mut page = native::NativePage::load(&lib, scene.clone(), chan, &args.data)?;
             page::run(chan, &scene, &mut page)
         }
     }

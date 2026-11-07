@@ -9,7 +9,8 @@ use nix::sys::socket::{
 };
 use serde::{Serialize, de::DeserializeOwned};
 
-const MAX_MSG: usize = 1 << 20;
+/// Fetched bodies travel in one message.
+const MAX_MSG: usize = 64 << 20;
 
 /// One end of a host/runner socket. `send` and `recv` may be used from
 /// different threads.
