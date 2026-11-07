@@ -1,0 +1,16 @@
+[package]
+name = "underweb-cli"
+description = "`uw`: build, publish and serve Underweb packages"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "uw"
+path = "src/main.rs"
+
+[dependencies]
+anyhow.workspace = true
+underweb-core.workspace = true
+underweb-pkg.workspace = true
+tiny_http = "0.12"

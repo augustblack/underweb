@@ -37,7 +37,16 @@ pub fn profile(policy: &Policy) -> String {
 (allow user-preference-read)
 "#,
     );
-    let sys = system_read_paths();
+    if policy.allow_exec {
+        // freshly started programs need the system's baseline (dyld,
+        // libSystem init, notifyd...): Apple's own system.sb
+        p.push_str("(import \"system.sb\")\n");
+        p.push_str("(allow process-exec* process-fork)\n(allow file-read-metadata)\n");
+        p.push_str(
+            "(allow file-read* file-write* (literal \"/dev/tty\") (regex #\"^/dev/fd/\"))\n",
+        );
+    }
+    let sys = system_read_paths(policy.allow_exec);
     let _ = writeln!(p, "(allow file-read* file-map-executable");
     for d in sys
         .iter()

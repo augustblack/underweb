@@ -28,6 +28,9 @@ pub struct Policy {
     pub read_only: Vec<PathBuf>,
     /// Directories readable and writable (its private data dir).
     pub read_write: Vec<PathBuf>,
+    /// Allow starting programs (the source builder runs compilers). They
+    /// inherit the same restrictions. Package runners never get this.
+    pub allow_exec: bool,
 }
 
 impl Policy {
@@ -46,6 +49,7 @@ impl Policy {
         Ok(Policy {
             read_only: canon(&self.read_only)?,
             read_write: canon(&self.read_write)?,
+            allow_exec: self.allow_exec,
         })
     }
 }
@@ -77,8 +81,37 @@ fn imp(_policy: &Policy) -> Result<()> {
 }
 
 /// Directories that hold shared libraries and fonts on this system, which
-/// a runner may read after lockdown.
-pub fn system_read_paths() -> Vec<PathBuf> {
+/// a runner may read after lockdown. With `exec`, also compilers and their
+/// headers, for the builder.
+pub fn system_read_paths(exec: bool) -> Vec<PathBuf> {
+    let mut paths = base_read_paths();
+    if exec {
+        let tools: &[&str] = if cfg!(target_os = "macos") {
+            &[
+                "/usr/bin",
+                "/bin",
+                "/usr/include",
+                "/Library/Developer",
+                "/Applications/Xcode.app",
+                "/private/var/db/xcode_select_link",
+                "/private/var/select",
+                "/private/etc",
+            ]
+        } else {
+            &["/bin", "/etc"]
+        };
+        paths.extend(
+            tools
+                .iter()
+                .map(Path::new)
+                .filter(|p| p.exists())
+                .map(Path::to_path_buf),
+        );
+    }
+    paths
+}
+
+fn base_read_paths() -> Vec<PathBuf> {
     let candidates: &[&str] = if cfg!(target_os = "macos") {
         &[
             "/System",

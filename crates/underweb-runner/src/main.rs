@@ -2,12 +2,14 @@
 //!
 //! ```text
 //! underweb-runner --ipc-fd N --package DIR --data DIR [--no-sandbox] [--param k=v]...
+//! underweb-runner --build ...   (see build.rs)
 //! ```
 //!
 //! Startup order matters: everything that needs broad file access (IPC,
 //! fonts, V8) is set up first, then the process locks itself down, and only
 //! then is package code loaded.
 
+mod build;
 mod js;
 mod native;
 mod page;
@@ -58,6 +60,9 @@ fn parse_args() -> Result<Args> {
 }
 
 fn main() {
+    if std::env::args().nth(1).as_deref() == Some("--build") {
+        build::main(std::env::args().skip(2));
+    }
     let args = match parse_args() {
         Ok(a) => a,
         Err(e) => {
@@ -94,6 +99,7 @@ fn run(chan: &Channel, args: Args) -> Result<()> {
             underweb_sandbox::lockdown(&underweb_sandbox::Policy {
                 read_only: vec![pkg.dir.clone()],
                 read_write: vec![args.data.clone()],
+                allow_exec: false,
             })?;
         }
         chan.send(

@@ -2,17 +2,29 @@
 
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::mpsc::{self, Receiver};
 use std::time::Instant;
 
 use eframe::egui;
 use underweb_core::{
-    Guest, GuestEvent, SpawnOptions, UW_POINTER_MOVE, UW_POINTER_PRESS, UW_POINTER_RELEASE,
+    Guest, GuestEvent, Origin, Resolved, SpawnOptions, Store, UW_POINTER_MOVE, UW_POINTER_PRESS,
+    UW_POINTER_RELEASE,
 };
+
+/// Messages from the thread that resolves (downloads, builds) a package.
+enum Loading {
+    Progress(String),
+    Done(Result<Resolved, String>),
+}
 
 pub enum Status {
     Empty,
+    /// Downloading or building; the latest progress line.
+    Loading(String),
     Starting,
-    Running { sandboxed: bool },
+    Running {
+        sandboxed: bool,
+    },
     Failed(String),
     Exited(String),
 }
@@ -21,7 +33,7 @@ impl Status {
     pub fn icon(&self) -> &'static str {
         match self {
             Status::Empty | Status::Running { .. } => "",
-            Status::Starting => "…",
+            Status::Starting | Status::Loading(_) => "…",
             Status::Failed(_) | Status::Exited(_) => "⚠",
         }
     }
@@ -33,6 +45,7 @@ impl Status {
             }
             Status::Running { sandboxed: false } => ("UNSANDBOXED", egui::Color32::RED),
             Status::Starting => ("starting", egui::Color32::GRAY),
+            Status::Loading(_) => ("loading", egui::Color32::GRAY),
             Status::Empty => ("", egui::Color32::GRAY),
             Status::Failed(_) | Status::Exited(_) => ("stopped", egui::Color32::RED),
         }
@@ -46,6 +59,7 @@ impl Status {
             Status::Running { sandboxed: false } => "The sandbox is off (--no-sandbox). Development only.".into(),
             Status::Failed(e) | Status::Exited(e) => e.clone(),
             Status::Starting => "Starting the package…".into(),
+            Status::Loading(l) => l.clone(),
             Status::Empty => "Type a package address.".into(),
         }
     }
@@ -67,6 +81,7 @@ pub struct Tab {
     animating: bool,
     last_tick: Option<Instant>,
     started: bool,
+    loading: Option<Receiver<Loading>>,
 }
 
 impl Tab {
@@ -83,6 +98,7 @@ impl Tab {
             animating: false,
             last_tick: None,
             started: false,
+            loading: None,
         }
     }
 
@@ -115,32 +131,61 @@ impl Tab {
         self.animating = false;
         self.last_tick = None;
         self.started = false;
+        self.loading = None;
         self.status = Status::Empty;
     }
 
-    fn start(&mut self, ctx: &egui::Context) {
+    /// Resolve the address on a background thread: remote packages may
+    /// need downloading and building.
+    fn start(&mut self, ctx: &egui::Context, store: &Arc<Store>) {
         self.started = true;
         if self.address.is_empty() {
             return;
         }
-        let (dir, params) = match resolve(&self.address) {
-            Ok(r) => r,
-            Err(e) => {
-                self.status = Status::Failed(e);
-                return;
-            }
-        };
+        let address = expand_example(&self.address);
+        let (tx, rx) = mpsc::channel();
+        let (store, ctx) = (store.clone(), ctx.clone());
+        std::thread::spawn(move || {
+            let progress = |l: &str| {
+                let _ = tx.send(Loading::Progress(l.to_string()));
+                ctx.request_repaint();
+            };
+            let result = store
+                .open(&address, &progress)
+                .map_err(|e| format!("{e:#}"));
+            let _ = tx.send(Loading::Done(result));
+            ctx.request_repaint();
+        });
+        self.loading = Some(rx);
+        self.status = Status::Loading("Opening…".into());
+    }
+
+    fn spawn(&mut self, ctx: &egui::Context, resolved: Resolved) {
         let wake_ctx = ctx.clone();
         let opts = SpawnOptions {
             sandbox: self.sandbox,
-            params,
+            params: resolved.params,
             wake: Some(Arc::new(move || wake_ctx.request_repaint())),
             ..Default::default()
         };
-        match Guest::spawn(&dir, opts) {
+        match Guest::spawn(&resolved.dir, opts) {
             Ok(g) => {
-                self.log
-                    .push(format!("── {} ({})", g.package.name(), dir.display()));
+                let from = match &resolved.origin {
+                    Origin::Local => resolved.dir.display().to_string(),
+                    Origin::Remote {
+                        index_url,
+                        version,
+                        built_from_source,
+                    } => format!(
+                        "{version} from {index_url}{}",
+                        if *built_from_source {
+                            ", built from source"
+                        } else {
+                            ""
+                        }
+                    ),
+                };
+                self.log.push(format!("── {} ({from})", g.package.name()));
                 self.guest = Some(g);
                 self.status = Status::Starting;
             }
@@ -149,9 +194,33 @@ impl Tab {
     }
 
     /// Drain runner events.
-    pub fn poll(&mut self, ctx: &egui::Context) {
+    pub fn poll(&mut self, ctx: &egui::Context, store: &Arc<Store>) {
         if !self.started {
-            self.start(ctx);
+            self.start(ctx, store);
+        }
+        if let Some(rx) = &self.loading {
+            let mut done = None;
+            while let Ok(m) = rx.try_recv() {
+                match m {
+                    Loading::Progress(l) => {
+                        self.log.push(l.clone());
+                        self.status = Status::Loading(l);
+                    }
+                    Loading::Done(r) => done = Some(r),
+                }
+            }
+            match done {
+                Some(Ok(resolved)) => {
+                    self.loading = None;
+                    self.spawn(ctx, resolved);
+                }
+                Some(Err(e)) => {
+                    self.loading = None;
+                    self.log.push(format!("error: {e}"));
+                    self.status = Status::Failed(e);
+                }
+                None => {}
+            }
         }
         let Some(guest) = self.guest.as_mut() else {
             return;
@@ -290,23 +359,15 @@ impl Tab {
     }
 }
 
-/// Address → package directory + parameters.
-fn resolve(address: &str) -> Result<(PathBuf, Vec<(String, String)>), String> {
-    let address = address.strip_prefix("file://").unwrap_or(address);
-    if address.starts_with("uw://") || address.starts_with("http") {
-        return Err(format!(
-            "{address}: remote packages and web pages come in a later version"
-        ));
+/// Bare names of the bundled examples (`hello-ts`) open them, so the
+/// browser is easy to try from a checkout.
+fn expand_example(address: &str) -> String {
+    if address.contains("://") {
+        return address.to_string();
     }
-    let (path, query) = address.split_once('?').unwrap_or((address, ""));
-    let params = query
-        .split('&')
-        .filter(|kv| !kv.is_empty())
-        .map(|kv| {
-            let (k, v) = kv.split_once('=').unwrap_or((kv, ""));
-            (k.to_string(), v.to_string())
-        })
-        .collect();
+    let (path, query) = address
+        .split_once('?')
+        .map_or((address, None), |(p, q)| (p, Some(q)));
     let candidates = [
         PathBuf::from(path),
         PathBuf::from("examples").join(path),
@@ -314,9 +375,14 @@ fn resolve(address: &str) -> Result<(PathBuf, Vec<(String, String)>), String> {
             .join("../../examples")
             .join(path),
     ];
-    candidates
+    match candidates
         .into_iter()
         .find(|p| p.join("underweb.toml").exists())
-        .map(|p| (p, params))
-        .ok_or_else(|| format!("No package at {path:?} (looking for underweb.toml)"))
+    {
+        Some(p) => match query {
+            Some(q) => format!("{}?{q}", p.display()),
+            None => p.display().to_string(),
+        },
+        None => address.to_string(),
+    }
 }

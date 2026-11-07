@@ -5,10 +5,10 @@
 //! underweb [--no-sandbox] [ADDRESS...]
 //! ```
 //!
-//! An address is a package directory (or `file://` URL), optionally with
-//! `?key=value&...` parameters for the page. Names of the bundled examples
-//! (`hello-js`, `hello-ts`, `hello-rust`, `hello-c`) work too. `uw://`
-//! addresses come with the package manager.
+//! An address is `uw://<domain>/<name>[@version]` or a package directory
+//! (or `file://` URL), optionally with `?key=value&...` parameters for the
+//! page. Names of the bundled examples (`hello-js`, `hello-ts`,
+//! `hello-rust`, `hello-c`) work too.
 //!
 //! `UNDERWEB_SNAPSHOT=out.png` saves a screenshot of the window once the
 //! visible tab has drawn (after `UNDERWEB_SNAPSHOT_DELAY` seconds, default 2)
@@ -17,12 +17,15 @@
 mod tab;
 
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use eframe::egui;
 use tab::Tab;
+use underweb_core::Store;
 
 struct App {
+    store: Arc<Store>,
     tabs: Vec<Tab>,
     active: usize,
     address: String,
@@ -56,7 +59,10 @@ impl App {
         } else {
             addresses
         };
+        let mut store = Store::new(Store::default_root());
+        store.sandbox = sandbox;
         App {
+            store: Arc::new(store),
             address: addresses[0].clone(),
             tabs: addresses.into_iter().map(Tab::new).collect(),
             active: 0,
@@ -109,7 +115,7 @@ impl App {
                 .on_hover_text(status.describe());
             let edit = ui.add(
                 egui::TextEdit::singleline(&mut self.address)
-                    .hint_text("package directory, e.g. examples/hello-ts?key=value")
+                    .hint_text("uw://example.org/package, or a package directory")
                     .desired_width(ui.available_width() - 60.0),
             );
             if edit.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
@@ -154,7 +160,7 @@ impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         for tab in &mut self.tabs {
             tab.sandbox = self.sandbox;
-            tab.poll(ctx);
+            tab.poll(ctx, &self.store);
         }
         egui::TopBottomPanel::top("chrome").show(ctx, |ui| {
             self.tab_bar(ui);

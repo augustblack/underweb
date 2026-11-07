@@ -8,7 +8,7 @@ sandboxed process.
 This is a Rust rewrite of the 2011 Vala project. See
 [docs/ROADMAP.md](docs/ROADMAP.md) for the design and phases.
 
-## Status: milestone 1
+## Status: phases 0–2
 
 Working on macOS:
 
@@ -24,10 +24,20 @@ Working on macOS:
 - layouts and shapes (paths, fill, stroke, pango text), hit testing, pointer
   events, animation driven by the display's frame rate, and HiDPI
 - shared-memory frames, so a crashing package only takes its own tab down
+- `uw://<domain>/<name>[@version]` packages: a release index served from
+  `https://<domain>/.well-known/underweb/<name>.toml`, archives checked
+  against their BLAKE3 hashes, a content-addressed cache that picks up new
+  versions on every open and still works offline
+- native packages with no prebuilt library for this machine are built from
+  source in a sandboxed builder (cc for C, cargo for Rust): build scripts
+  can run compilers but can't reach the network or your files
+- `uw`, a command-line tool for authors: `build`, `publish`, `serve`
+- the engine as a C library (`include/underweb_engine.h`)
 
-Not yet: package archives, `uw://` addresses, signing (phase 2);
-permissions and networking (3); trust (4); CEF web pages (5); audio and Pd
-(6); video (7); the layout editor (8); Windows (9).
+Not yet: signatures (with trust, phase 4); permissions and networking (3);
+CEF web pages (5); audio and Pd (6); video (7); the layout editor (8);
+Windows (9). Until phase 4, a package is only as trustworthy as the HTTPS
+site serving its index.
 
 ## Build and run
 
@@ -42,14 +52,30 @@ cargo xtask examples          # builds the runner and the native example package
 cargo run -p underweb-app -- hello-js hello-ts hello-rust hello-c
 ```
 
-Addresses are package directories, optionally with parameters
-(`examples/probe-rust?crash=1`). `--no-sandbox` turns the sandbox off for
+Addresses are `uw://` packages or package directories, optionally with
+parameters (`examples/probe-rust?crash=1`). `--no-sandbox` turns the sandbox off for
 debugging, and the badge turns red.
 
 `cargo xtask test` builds everything and runs all tests, including the
 sandbox tests: a probe package tries to read your files, write outside its
 folder, open a TCP connection and run `/bin/sh`, and every attempt must
 fail. The same probe with the sandbox off must succeed.
+
+## Publishing
+
+A repository is a plain directory you can upload to any web server:
+
+```sh
+cargo run -p underweb-cli -- publish examples/hello-ts --repo site/
+cargo run -p underweb-cli -- publish examples/hello-c --repo site/   # source + this machine's build
+cargo run -p underweb-cli -- serve site/ --port 8000                # local test server
+cargo run -p underweb-app -- uw://localhost:8000/hello-ts
+```
+
+Uploaded to `https://example.org/`, the packages are at
+`uw://example.org/hello-ts`. Publish native packages from each platform
+(or CI) to add prebuilt libraries; machines without one build from the
+source archive.
 
 ## Writing a package
 
@@ -85,14 +111,16 @@ See `examples/` for the same idea in Rust (the `underweb` crate and
 | Path | What |
 |---|---|
 | `apps/underweb-app` | the browser (eframe/egui on wgpu) |
-| `crates/underweb-core` | the engine as a library: spawns runners, receives frames |
+| `crates/underweb-core` | the engine as a library: package store and builder, spawns runners, receives frames |
 | `crates/underweb-runner` | the per-package process: V8 or native loader, frame loop |
 | `crates/underweb-guest` | the page API (scene of layouts and shapes) and its cairo/pango renderer |
 | `crates/underweb-sandbox` | per-OS lockdown |
 | `crates/underweb-ipc` | socket messages with fd passing, shared memory |
 | `crates/underweb-abi` | the C ABI, source of `include/underweb.h` |
 | `crates/underweb` | SDK for Rust packages |
-| `crates/underweb-pkg` | `underweb.toml` |
+| `crates/underweb-pkg` | `underweb.toml`, archives, release indexes, addresses, publishing |
+| `crates/underweb-cli` | `uw`, the authoring tool |
+| `crates/underweb-capi` | the engine as a C library |
 | `sdk/js` | TypeScript types for JS/TS packages |
 | `xtask` | `cargo xtask examples / header / test` |
 

@@ -21,7 +21,7 @@ underweb-sandbox = { path = "crates/underweb-sandbox" }
 underweb-guest = { path = "crates/underweb-guest" }
 underweb-pkg = { path = "crates/underweb-pkg" }
 underweb-core = { path = "crates/underweb-core" }
-underweb = { path = "crates/underweb", default-features = false }
+underweb-capi = { path = "crates/underweb-capi" }
 
 anyhow = "1"
 serde = { version = "1", features = ["derive"] }

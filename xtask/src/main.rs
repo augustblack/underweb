@@ -67,8 +67,16 @@ fn examples() -> Result<()> {
     let triple = host_triple()?;
     let mut cmd = Command::new(env!("CARGO"));
     // the runner too: tests and the app spawn it from target/debug
-    cmd.args(["build", "-p", "underweb-runner"])
-        .current_dir(&root);
+    cmd.args([
+        "build",
+        "-p",
+        "underweb-runner",
+        "-p",
+        "underweb-capi",
+        "-p",
+        "underweb-cli",
+    ])
+    .current_dir(&root);
     for e in NATIVE_RUST_EXAMPLES {
         cmd.args(["-p", e]);
     }
@@ -107,14 +115,20 @@ fn examples() -> Result<()> {
 
 fn header() -> Result<()> {
     let root = root();
-    let config = cbindgen::Config::from_file(root.join("crates/underweb-abi/cbindgen.toml"))
-        .map_err(|e| anyhow::anyhow!("{e}"))?;
-    cbindgen::Builder::new()
-        .with_crate(root.join("crates/underweb-abi"))
-        .with_config(config)
-        .generate()
-        .context("cbindgen")?
-        .write_to_file(root.join("include/underweb.h"));
-    println!("wrote include/underweb.h");
+    for (krate, out) in [
+        ("underweb-abi", "underweb.h"),
+        ("underweb-capi", "underweb_engine.h"),
+    ] {
+        let dir = root.join("crates").join(krate);
+        let config = cbindgen::Config::from_file(dir.join("cbindgen.toml"))
+            .map_err(|e| anyhow::anyhow!("{e}"))?;
+        cbindgen::Builder::new()
+            .with_crate(&dir)
+            .with_config(config)
+            .generate()
+            .context("cbindgen")?
+            .write_to_file(root.join("include").join(out));
+        println!("wrote include/{out}");
+    }
     Ok(())
 }

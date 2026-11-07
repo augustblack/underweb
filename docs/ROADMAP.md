@@ -123,14 +123,14 @@ Trust doesn't depend on any one network. The UI never shows protocol words like 
 
 ## Phases
 0. **Skeleton.** Workspace, `cargo xtask`, and CI on GitHub Actions (macOS required, Linux builds).
-1. **Milestone 1: sandboxed hello in 3 languages, on macOS.**
+1. **Milestone 1: sandboxed hello in 3 languages, on macOS.** *Done (plus C).*
    - Host window (winit, wgpu, egui with a URL bar and tabs).
    - The runner process, IPC, and double-buffered shm cairo frames.
    - Guest API v0: Layout and Shape (rect, path, fill, stroke), plus text with pango.
    - Runner modes: `--js` (V8), `--js` with TS transpiled by deno_ast, and `--native` for a Rust cdylib; `hello-c` through `underweb.h` as a stretch goal.
    - The macOS sandbox profile, plus Linux landlock and seccomp built in CI.
    - Packages load from a local directory with a manifest; no signing yet.
-2. **Packages.** Archives, cache, `uw://` resolution, prebuilt targets, the sandboxed source builder, and the C embedding API.
+2. **Packages.** Archives, cache, `uw://` resolution, prebuilt targets, the sandboxed source builder, and the C embedding API. *Done.* `uw://<domain>/<name>` resolves to `https://<domain>/.well-known/underweb/<name>.toml`, so ATProto handles (which are domains) fit in phase 4 without changing addresses. C builds use the system compiler, not a bundled zig yet.
 3. **Permissions.** The broker, fd-passed TCP/UDP, fetch, storage, and prompts.
 4. **Trust.** The statement format, local verification, the policy engine and the trust panel, then the ATProto adapter (login, records, follows, labelers). The signed-list adapter follows, as a way to test the adapter trait.
 5. **CEF.** CEF tabs with offscreen compositing and the macOS bundle.

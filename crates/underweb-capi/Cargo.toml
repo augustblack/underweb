@@ -1,0 +1,13 @@
+[package]
+name = "underweb-capi"
+description = "C API for embedding the Underweb engine (include/underweb_engine.h)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+name = "underweb_engine"
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+underweb-core.workspace = true

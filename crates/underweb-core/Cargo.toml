@@ -10,6 +10,10 @@ anyhow.workspace = true
 underweb-ipc.workspace = true
 underweb-pkg.workspace = true
 underweb-abi.workspace = true
+ureq = "3"
+url = "2"
 
 [dev-dependencies]
 cairo-rs.workspace = true
+tiny_http = "0.12"
+tempfile = "3"
