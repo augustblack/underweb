@@ -12,6 +12,7 @@ path = "src/main.rs"
 [dependencies]
 anyhow.workspace = true
 underweb-core.workspace = true
+underweb-export.workspace = true
 eframe = { version = "0.33", default-features = false, features = ["accesskit", "default_fonts", "wgpu", "wayland", "x11"] }
 png = "0.17"
 # eframe without default features leaves wgpu with no backend; take its defaults (Metal, Vulkan, DX12, GL)

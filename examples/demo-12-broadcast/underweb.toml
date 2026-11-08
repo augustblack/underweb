@@ -1,0 +1,12 @@
+[package]
+name = "demo-12-broadcast"
+version = "0.1.0"
+kind = "js"
+entry = "main.js"
+description = "demos/12videoencode, ported: send video to an Icecast server and show it. ?url=http://host:port/mount.ogg&password=...&source=camera"
+
+[permissions]
+net.tcp.connect = ["localhost:8000", "127.0.0.1:8000"]
+camera = true
+# to play the stream back from the server
+fetch = ["http://localhost:8000/", "http://127.0.0.1:8000/"]

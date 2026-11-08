@@ -1057,6 +1057,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "color_quant"
+version = "1.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3d7b894f5411737b7867f4827955924d7c254fc9f4d91a6aad6b097804b1018b"
+
+[[package]]
 name = "colorchoice"
 version = "1.0.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1365,6 +1371,13 @@ checksum = "bef552e6f588e446098f6ba40d89ac146c8c7b64aade83c051ee00bb5d2bc18d"
 dependencies = [
  "serde",
  "uuid",
+]
+
+[[package]]
+name = "demo-08-draw"
+version = "0.1.0"
+dependencies = [
+ "underweb",
 ]
 
 [[package]]
@@ -2232,6 +2245,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "gif"
+version = "0.14.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ee8cfcc411d9adbbaba82fb72661cc1bcca13e8bba98b364e62b2dba8f960159"
+dependencies = [
+ "color_quant",
+ "weezl",
+]
+
+[[package]]
 name = "gio"
 version = "0.21.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2872,10 +2895,14 @@ checksum = "85ab80394333c02fe689eaf900ab500fbd0c2213da414687ebf995a65d5a6104"
 dependencies = [
  "bytemuck",
  "byteorder-lite",
+ "color_quant",
+ "gif",
  "moxcms",
  "num-traits",
  "png 0.18.1",
  "tiff",
+ "zune-core",
+ "zune-jpeg",
 ]
 
 [[package]]
@@ -5836,6 +5863,7 @@ dependencies = [
  "eframe",
  "png 0.17.16",
  "underweb-core",
+ "underweb-export",
  "wgpu",
 ]
 
@@ -5863,6 +5891,7 @@ dependencies = [
  "anyhow",
  "tiny_http",
  "underweb-core",
+ "underweb-export",
  "underweb-pkg",
 ]
 
@@ -5887,10 +5916,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "underweb-export"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "underweb-core",
+ "underweb-ipc",
+ "underweb-pkg",
+]
+
+[[package]]
 name = "underweb-guest"
 version = "0.1.0"
 dependencies = [
  "cairo-rs",
+ "image",
  "pango",
  "pangocairo",
  "underweb-ipc",

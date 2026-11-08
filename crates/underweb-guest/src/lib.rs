@@ -1,74 +1,112 @@
 //! The curated page API, implemented once in Rust.
 //!
 //! This is the successor of `libmentiras`: a window holds layouts, a layout
-//! holds shapes, and a shape is a cairo path with fill, stroke and pango
-//! text. The runner exposes it to native packages through the C ABI in
-//! `underweb-abi` and to JS/TS packages through V8 ops; both front ends call
-//! into [`Scene`].
+//! holds shapes, and a shape is a cairo path with fill, stroke, an image or
+//! video inside it, and pango text. The runner exposes it to native
+//! packages through the C ABI in `underweb-abi` and to JS/TS packages
+//! through V8 ops; both front ends call into [`Scene`].
 //!
-//! The scene is retained (not immediate-mode) so the host can hit-test and,
-//! later, so the layout editor can inspect and edit it.
+//! The scene is retained (not immediate-mode) so the host can hit-test,
+//! and so the layout editor can inspect it ([`Scene::doc`]) and change it
+//! ([`Scene::apply`]).
+
+mod text;
 
 use std::cell::RefCell;
 use std::collections::HashMap;
+use std::path::{Component, Path, PathBuf};
 
 use underweb_ipc::VideoMailbox;
+pub use underweb_ipc::scene::{EditOp, Id, LayoutDoc, Matrix, PathOp, Rgba, SceneDoc, ShapeDoc};
 
 pub use cairo;
 pub use pango;
 
-pub type Id = u32;
-
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct Rgba(pub f64, pub f64, pub f64, pub f64);
-
-impl Rgba {
-    pub const BLACK: Rgba = Rgba(0.0, 0.0, 0.0, 1.0);
-}
-
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub enum PathOp {
-    MoveTo(f64, f64),
-    LineTo(f64, f64),
-    CurveTo(f64, f64, f64, f64, f64, f64),
-    Rectangle(f64, f64, f64, f64),
-    Close,
-}
-
 #[derive(Debug, Clone)]
 pub struct Shape {
+    pub name: String,
     pub path: Vec<PathOp>,
+    /// From the shape's own coordinates to the window's.
+    pub matrix: Matrix,
     pub fill: Option<Rgba>,
     pub stroke: Option<Rgba>,
     pub stroke_width: f64,
     pub text: Option<String>,
     pub text_color: Rgba,
     pub font: String,
+    /// The text is Pango markup.
+    pub markup: bool,
+    /// The text flows word by word inside the path.
+    pub flow: bool,
+    /// An image drawn at the shape's origin, clipped to the path.
+    pub image: Option<Id>,
     /// A video stream shown inside the path.
     pub video: Option<Id>,
 }
 
 impl Default for Shape {
     fn default() -> Self {
+        let d = ShapeDoc::default();
         Shape {
-            path: Vec::new(),
-            fill: None,
-            stroke: Some(Rgba::BLACK),
-            stroke_width: 1.0,
-            text: None,
-            text_color: Rgba::BLACK,
-            font: "Sans 14".into(),
+            name: d.name,
+            path: d.path,
+            matrix: d.matrix,
+            fill: d.fill,
+            stroke: d.stroke,
+            stroke_width: d.stroke_width,
+            text: d.text,
+            text_color: d.text_color,
+            font: d.font,
+            markup: d.markup,
+            flow: d.flow,
+            image: None,
             video: None,
         }
     }
 }
 
+/// A fill or stroke colour; fully transparent means none.
+pub fn paint(r: f64, g: f64, b: f64, a: f64) -> Option<Rgba> {
+    (a > 0.0).then_some(Rgba(r, g, b, a))
+}
+
 /// Inner padding between a shape's bounding box and its text.
 const TEXT_PADDING: f64 = 10.0;
+/// Images larger than this are refused (pixels).
+const MAX_IMAGE_PIXELS: u64 = 64 << 20;
 
 #[derive(Debug, Default, Clone)]
 pub struct Layout {
     pub shapes: Vec<Id>,
+    /// Painted over the whole window under the layout's shapes.
+    pub background: Option<Rgba>,
+}
+
+/// A decoded image: where it came from ("" for bytes) and its pixels.
+pub struct Image {
+    pub source: String,
+    surface: cairo::ImageSurface,
+}
+
+impl std::fmt::Debug for Image {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "Image({:?} {}x{})",
+            self.source,
+            self.width(),
+            self.height()
+        )
+    }
+}
+
+impl Image {
+    pub fn width(&self) -> u32 {
+        self.surface.width() as u32
+    }
+    pub fn height(&self) -> u32 {
+        self.surface.height() as u32
+    }
 }
 
 /// A video stream's mailbox and the last frame turned into a surface.
@@ -133,8 +171,13 @@ pub struct Scene {
     pub height: f64,
     pub params: HashMap<String, String>,
     pub animating: bool,
+    /// Where package files (images) are read from.
+    pub package_dir: Option<PathBuf>,
     dirty: bool,
+    images: Vec<Image>,
     videos: HashMap<Id, Video>,
+    /// What each video stream was opened from, for the editor.
+    video_sources: HashMap<Id, String>,
     /// Target for calls with unknown shape ids; never drawn.
     scratch: Shape,
 }
@@ -180,13 +223,23 @@ impl Scene {
         self.layouts.get((id as usize).wrapping_sub(1))
     }
 
+    fn layout_mut(&mut self, id: Id) -> Option<&mut Layout> {
+        self.dirty = true;
+        self.layouts.get_mut((id as usize).wrapping_sub(1))
+    }
+
     pub fn layout_append(&mut self, layout: Id, shape: Id) {
         if self.shape(shape).is_none() {
             return;
         }
-        if let Some(l) = self.layouts.get_mut((layout as usize).wrapping_sub(1)) {
+        if let Some(l) = self.layout_mut(layout) {
             l.shapes.push(shape);
-            self.dirty = true;
+        }
+    }
+
+    pub fn layout_set_background(&mut self, layout: Id, color: Option<Rgba>) {
+        if let Some(l) = self.layout_mut(layout) {
+            l.background = color;
         }
     }
 
@@ -212,6 +265,78 @@ impl Scene {
         }
     }
 
+    /// Show an image in the shape. A shape with no path yet gets the
+    /// image's rectangle.
+    pub fn shape_set_image(&mut self, id: Id, image: Option<Id>) {
+        let size = image
+            .and_then(|i| self.image(i))
+            .map(|i| (i.width(), i.height()));
+        let shape = self.shape_mut(id);
+        shape.image = image.filter(|_| size.is_some());
+        if let (Some((w, h)), true) = (size, shape.path.is_empty()) {
+            shape
+                .path
+                .push(PathOp::Rectangle(0.0, 0.0, w as f64, h as f64));
+        }
+    }
+
+    // ---- images ---------------------------------------------------------
+
+    /// Decode an image (PNG, JPEG or GIF). `source` is remembered for the
+    /// editor.
+    pub fn image_from_bytes(&mut self, source: &str, bytes: &[u8]) -> Result<Id, String> {
+        let img = image::load_from_memory(bytes).map_err(|e| format!("bad image: {e}"))?;
+        let (w, h) = (img.width(), img.height());
+        if w as u64 * h as u64 > MAX_IMAGE_PIXELS {
+            return Err(format!("image too large ({w}x{h})"));
+        }
+        let rgba = img.into_rgba8();
+        let mut surface = cairo::ImageSurface::create(cairo::Format::ARgb32, w as i32, h as i32)
+            .map_err(|e| e.to_string())?;
+        let stride = surface.stride() as usize;
+        {
+            let mut data = surface.data().map_err(|e| e.to_string())?;
+            for (y, row) in rgba.rows().enumerate() {
+                let out = &mut data[y * stride..y * stride + w as usize * 4];
+                for (px, o) in row.zip(out.chunks_exact_mut(4)) {
+                    let [r, g, b, a] = px.0;
+                    let pm = |c: u8| ((c as u16 * a as u16 + 127) / 255) as u8;
+                    // cairo ARGB32 is native-endian: B G R A in memory
+                    o.copy_from_slice(&u32::from_be_bytes([a, pm(r), pm(g), pm(b)]).to_ne_bytes());
+                }
+            }
+        }
+        surface.mark_dirty();
+        self.images.push(Image {
+            source: source.to_string(),
+            surface,
+        });
+        Ok(self.images.len() as Id)
+    }
+
+    /// Load an image file from the package (a relative path).
+    pub fn image_open(&mut self, rel: &str) -> Result<Id, String> {
+        let path = self.package_file(rel)?;
+        let bytes = std::fs::read(&path).map_err(|e| format!("{rel}: {e}"))?;
+        self.image_from_bytes(rel, &bytes)
+    }
+
+    pub fn image(&self, id: Id) -> Option<&Image> {
+        self.images.get((id as usize).wrapping_sub(1))
+    }
+
+    fn package_file(&self, rel: &str) -> Result<PathBuf, String> {
+        let p = Path::new(rel);
+        if rel.is_empty()
+            || p.is_absolute()
+            || p.components().any(|c| !matches!(c, Component::Normal(_)))
+        {
+            return Err(format!("{rel:?}: files are named relative to the package"));
+        }
+        let dir = self.package_dir.as_ref().ok_or("no package directory")?;
+        Ok(dir.join(p))
+    }
+
     // ---- video ----------------------------------------------------------
 
     pub fn video_attach(&mut self, id: Id, mailbox: VideoMailbox) {
@@ -227,7 +352,13 @@ impl Scene {
 
     pub fn video_remove(&mut self, id: Id) {
         self.videos.remove(&id);
+        self.video_sources.remove(&id);
         self.dirty = true;
+    }
+
+    /// Remember what stream `id` was opened from (for the editor).
+    pub fn video_source(&mut self, id: Id, source: &str) {
+        self.video_sources.insert(id, source.to_string());
     }
 
     pub fn video(&self, id: Id) -> Option<&Video> {
@@ -246,6 +377,134 @@ impl Scene {
         })
     }
 
+    // ---- the editor's view ----------------------------------------------
+
+    /// The shown layouts and their shapes as plain data.
+    pub fn doc(&self) -> SceneDoc {
+        SceneDoc {
+            title: self.title.clone(),
+            layouts: self
+                .window_layouts
+                .iter()
+                .filter_map(|&l| {
+                    let layout = self.layout(l)?;
+                    Some(LayoutDoc {
+                        id: l,
+                        background: layout.background,
+                        shapes: layout
+                            .shapes
+                            .iter()
+                            .filter_map(|&s| Some(self.shape_doc(s, self.shape(s)?)))
+                            .collect(),
+                    })
+                })
+                .collect(),
+        }
+    }
+
+    fn shape_doc(&self, id: Id, s: &Shape) -> ShapeDoc {
+        ShapeDoc {
+            id,
+            name: s.name.clone(),
+            path: s.path.clone(),
+            matrix: s.matrix,
+            fill: s.fill,
+            stroke: s.stroke,
+            stroke_width: s.stroke_width,
+            text: s.text.clone(),
+            text_color: s.text_color,
+            font: s.font.clone(),
+            markup: s.markup,
+            flow: s.flow,
+            image: s
+                .image
+                .and_then(|i| self.image(i))
+                .map(|i| i.source.clone()),
+            video: s
+                .video
+                .map(|v| self.video_sources.get(&v).cloned().unwrap_or_default()),
+        }
+    }
+
+    /// Apply a layout-editor change. Returns the new shape's id for
+    /// [`EditOp::NewShape`].
+    pub fn apply(&mut self, op: EditOp) -> Result<Option<Id>, String> {
+        match op {
+            EditOp::SetShape(doc) => {
+                if self.shape(doc.id).is_none() {
+                    return Err(format!("no shape {}", doc.id));
+                }
+                self.set_from_doc(doc.id, doc)?;
+                Ok(None)
+            }
+            EditOp::NewShape { layout, shape } => {
+                let layout = if self.window_layouts.contains(&layout) {
+                    layout
+                } else {
+                    let l = self.layout_new();
+                    self.add_layout(l);
+                    l
+                };
+                let id = self.shape_new();
+                self.set_from_doc(id, shape)?;
+                self.layout_append(layout, id);
+                Ok(Some(id))
+            }
+            EditOp::Delete(id) => {
+                for l in &mut self.layouts {
+                    l.shapes.retain(|&s| s != id);
+                }
+                self.dirty = true;
+                Ok(None)
+            }
+            EditOp::Restack { id, up } => {
+                for l in &mut self.layouts {
+                    if let Some(i) = l.shapes.iter().position(|&s| s == id) {
+                        let j = if up { i + 1 } else { i.wrapping_sub(1) };
+                        if j < l.shapes.len() {
+                            l.shapes.swap(i, j);
+                        }
+                    }
+                }
+                self.dirty = true;
+                Ok(None)
+            }
+            EditOp::SetBackground { layout, color } => {
+                self.layout_set_background(layout, color);
+                Ok(None)
+            }
+            EditOp::SetTitle(t) => {
+                self.title = t;
+                Ok(None)
+            }
+        }
+    }
+
+    fn set_from_doc(&mut self, id: Id, d: ShapeDoc) -> Result<(), String> {
+        // a new image source is loaded; the same one (or "") keeps the image
+        let old = self.shape(id).and_then(|s| s.image);
+        let old_source = old.and_then(|i| self.image(i)).map(|i| i.source.clone());
+        let image = match &d.image {
+            None => None,
+            Some(src) if src.is_empty() || Some(src) == old_source.as_ref() => old,
+            Some(src) => Some(self.image_open(src)?),
+        };
+        let s = self.shape_mut(id);
+        s.name = d.name;
+        s.path = d.path;
+        s.matrix = d.matrix;
+        s.fill = d.fill;
+        s.stroke = d.stroke;
+        s.stroke_width = d.stroke_width;
+        s.text = d.text;
+        s.text_color = d.text_color;
+        s.font = d.font;
+        s.markup = d.markup;
+        s.flow = d.flow;
+        self.shape_set_image(id, image);
+        Ok(())
+    }
+
     // ---- rendering ------------------------------------------------------
 
     /// Draw every visible layout. The context is in logical pixels.
@@ -254,13 +513,18 @@ impl Scene {
             let Some(layout) = self.layout(l) else {
                 continue;
             };
+            if let Some(bg) = layout.background {
+                set_color(cr, bg);
+                let _ = cr.paint();
+            }
             for &s in &layout.shapes {
                 if let Some(shape) = self.shape(s) {
                     let video = shape
                         .video
                         .and_then(|v| self.videos.get(&v))
                         .and_then(Video::surface);
-                    render_shape(cr, shape, video.as_ref());
+                    let image = shape.image.and_then(|i| self.image(i)).map(|i| &i.surface);
+                    render_shape(cr, shape, image, video.as_ref());
                 }
             }
         }
@@ -276,11 +540,16 @@ impl Scene {
             };
             for &s in layout.shapes.iter().rev() {
                 let Some(shape) = self.shape(s) else { continue };
+                if shape.matrix.invert().is_none() {
+                    continue;
+                }
+                cr.set_matrix(to_cairo(&shape.matrix));
                 cr.new_path();
                 append_path(&cr, &shape.path);
                 cr.set_line_width(shape.stroke_width);
-                let inside = cr.in_fill(x, y).unwrap_or(false)
-                    || (shape.stroke.is_some() && cr.in_stroke(x, y).unwrap_or(false));
+                let (ux, uy) = cr.device_to_user(x, y).unwrap_or((x, y));
+                let inside = cr.in_fill(ux, uy).unwrap_or(false)
+                    || (shape.stroke.is_some() && cr.in_stroke(ux, uy).unwrap_or(false));
                 if inside {
                     return s;
                 }
@@ -288,6 +557,10 @@ impl Scene {
         }
         0
     }
+}
+
+fn to_cairo(m: &Matrix) -> cairo::Matrix {
+    cairo::Matrix::new(m.xx, m.yx, m.xy, m.yy, m.x0, m.y0)
 }
 
 fn append_path(cr: &cairo::Context, path: &[PathOp]) {
@@ -306,13 +579,31 @@ fn set_color(cr: &cairo::Context, c: Rgba) {
     cr.set_source_rgba(c.0, c.1, c.2, c.3);
 }
 
-fn render_shape(cr: &cairo::Context, shape: &Shape, video: Option<&cairo::ImageSurface>) {
+fn render_shape(
+    cr: &cairo::Context,
+    shape: &Shape,
+    image: Option<&cairo::ImageSurface>,
+    video: Option<&cairo::ImageSurface>,
+) {
+    if shape.matrix.invert().is_none() {
+        return; // squashed flat: nothing to see
+    }
+    let _ = cr.save();
+    cr.transform(to_cairo(&shape.matrix));
     cr.new_path();
     append_path(cr, &shape.path);
     let (x0, y0, x1, y1) = cr.path_extents().unwrap_or((0.0, 0.0, 0.0, 0.0));
     if let Some(fill) = shape.fill {
         set_color(cr, fill);
         let _ = cr.fill_preserve();
+    }
+    if let Some(img) = image {
+        // at the shape's origin, clipped to the path (as Mentiras.Image)
+        let _ = cr.save();
+        cr.clip_preserve();
+        let _ = cr.set_source_surface(img, 0.0, 0.0);
+        let _ = cr.paint();
+        let _ = cr.restore();
     }
     if let Some(frame) = video {
         // fill the shape's bounds, keeping the picture's proportions,
@@ -337,18 +628,28 @@ fn render_shape(cr: &cairo::Context, shape: &Shape, video: Option<&cairo::ImageS
     }
     cr.new_path();
 
-    if let Some(text) = &shape.text {
-        let layout = pangocairo::functions::create_layout(cr);
-        layout.set_font_description(Some(&pango::FontDescription::from_string(&shape.font)));
-        let width = (x1 - x0 - 2.0 * TEXT_PADDING).max(1.0);
-        layout.set_width((width * pango::SCALE as f64) as i32);
-        layout.set_wrap(pango::WrapMode::WordChar);
-        layout.set_text(text);
+    if let Some(text) = shape.text.as_deref().filter(|t| !t.is_empty()) {
+        let font = pango::FontDescription::from_string(&shape.font);
         set_color(cr, shape.text_color);
-        cr.move_to(x0 + TEXT_PADDING, y0 + TEXT_PADDING);
-        pangocairo::functions::show_layout(cr, &layout);
+        if shape.flow {
+            text::flow(cr, &shape.path, (x0, y0, x1, y1), text, shape.markup, &font);
+        } else {
+            let layout = pangocairo::functions::create_layout(cr);
+            layout.set_font_description(Some(&font));
+            let width = (x1 - x0 - 2.0 * TEXT_PADDING).max(1.0);
+            layout.set_width((width * pango::SCALE as f64) as i32);
+            layout.set_wrap(pango::WrapMode::WordChar);
+            if shape.markup {
+                layout.set_markup(text);
+            } else {
+                layout.set_text(text);
+            }
+            cr.move_to(x0 + TEXT_PADDING, y0 + TEXT_PADDING);
+            pangocairo::functions::show_layout(cr, &layout);
+        }
         cr.new_path();
     }
+    let _ = cr.restore();
 }
 
 /// Render a frame into a cairo ARGB32 buffer of `width` x `height` physical
@@ -418,6 +719,17 @@ mod tests {
         (s, sh)
     }
 
+    fn render(s: &Scene, w: u32, h: u32) -> Vec<u8> {
+        let mut buf = vec![0u8; (w * 4 * h) as usize];
+        unsafe { render_frame(s, buf.as_mut_ptr(), w, h, w * 4, 1.0, |_| {}) };
+        buf
+    }
+
+    fn pixel(buf: &[u8], w: u32, x: u32, y: u32) -> [u8; 4] {
+        let i = ((y * w + x) * 4) as usize;
+        buf[i..i + 4].try_into().unwrap()
+    }
+
     #[test]
     fn hit_test_finds_topmost() {
         let (mut s, a) = rect_scene();
@@ -437,15 +749,132 @@ mod tests {
     fn renders_fill_into_buffer() {
         let (mut s, sh) = rect_scene();
         s.shape_mut(sh).text = Some("hello".into());
-        let (w, h) = (200u32, 100u32);
-        let mut buf = vec![0u8; (w * 4 * h) as usize];
-        unsafe { render_frame(&s, buf.as_mut_ptr(), w, h, w * 4, 1.0, |_| {}) };
+        let buf = render(&s, 200, 100);
         // pixel (100, 55) is inside the red rect, below the text: BGRA
-        let i = ((55 * w + 100) * 4) as usize;
-        assert_eq!(&buf[i..i + 4], &[0, 0, 255, 255]);
+        assert_eq!(pixel(&buf, 200, 100, 55), [0, 0, 255, 255]);
         // outside is the white background
-        let i = ((90 * w + 190) * 4) as usize;
-        assert_eq!(&buf[i..i + 4], &[255, 255, 255, 255]);
+        assert_eq!(pixel(&buf, 200, 190, 90), [255, 255, 255, 255]);
+    }
+
+    #[test]
+    fn matrix_moves_drawing_and_hit_testing() {
+        let (mut s, sh) = rect_scene();
+        s.shape_mut(sh).stroke = None;
+        s.shape_mut(sh).matrix = Matrix::IDENTITY.translate(100.0, 20.0);
+        assert_eq!(s.hit_test(50.0, 30.0), 0);
+        assert_eq!(s.hit_test(150.0, 50.0), sh);
+        let buf = render(&s, 300, 120);
+        assert_eq!(pixel(&buf, 300, 50, 30), [255, 255, 255, 255]);
+        assert_eq!(pixel(&buf, 300, 150, 50), [0, 0, 255, 255]);
+    }
+
+    #[test]
+    fn layout_background_and_image() {
+        let (mut s, sh) = rect_scene();
+        s.layout_set_background(1, Some(Rgba(0.0, 1.0, 0.0, 1.0)));
+        // a blue PNG, made with cairo
+        let png = {
+            let img = cairo::ImageSurface::create(cairo::Format::ARgb32, 200, 200).unwrap();
+            let cr = cairo::Context::new(&img).unwrap();
+            cr.set_source_rgb(0.0, 0.0, 1.0);
+            cr.paint().unwrap();
+            drop(cr);
+            let mut out = Vec::new();
+            img.write_to_png(&mut out).unwrap();
+            out
+        };
+        let img = s.image_from_bytes("blue.png", &png).unwrap();
+        s.shape_set_image(sh, Some(img));
+        let buf = render(&s, 200, 100);
+        assert_eq!(pixel(&buf, 200, 190, 90), [0, 255, 0, 255], "background");
+        assert_eq!(
+            pixel(&buf, 200, 50, 30),
+            [255, 0, 0, 255],
+            "image in the path"
+        );
+        assert_eq!(
+            s.doc().layouts[0].shapes[0].image.as_deref(),
+            Some("blue.png")
+        );
+        assert!(s.image_from_bytes("x", b"not an image").is_err());
+    }
+
+    #[test]
+    fn image_paths_stay_in_the_package() {
+        let mut s = Scene::new();
+        s.package_dir = Some(PathBuf::from("/tmp"));
+        for bad in ["../x.png", "/etc/passwd", "a/../../b.png", ""] {
+            assert!(s.image_open(bad).is_err(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn doc_and_edits_round_trip() {
+        let (mut s, sh) = rect_scene();
+        s.shape_mut(sh).name = "box".into();
+        let doc = s.doc();
+        assert_eq!(doc.layouts.len(), 1);
+        let mut d = doc.layouts[0].shapes[0].clone();
+        assert_eq!(d.name, "box");
+        d.matrix = Matrix::IDENTITY.translate(5.0, 5.0);
+        d.text = Some("moved".into());
+        s.apply(EditOp::SetShape(d.clone())).unwrap();
+        assert_eq!(s.doc().layouts[0].shapes[0], d);
+
+        let new = s
+            .apply(EditOp::NewShape {
+                layout: 1,
+                shape: ShapeDoc {
+                    path: vec![PathOp::Rectangle(0.0, 0.0, 5.0, 5.0)],
+                    ..Default::default()
+                },
+            })
+            .unwrap()
+            .unwrap();
+        assert_eq!(s.doc().layouts[0].shapes.len(), 2);
+        s.apply(EditOp::Restack { id: new, up: false }).unwrap();
+        assert_eq!(s.doc().layouts[0].shapes[0].id, new);
+        s.apply(EditOp::Delete(new)).unwrap();
+        assert_eq!(s.doc().layouts[0].shapes.len(), 1);
+        // a shape for an empty page gets a layout of its own
+        let mut empty = Scene::new();
+        empty
+            .apply(EditOp::NewShape {
+                layout: 0,
+                shape: ShapeDoc::default(),
+            })
+            .unwrap();
+        assert_eq!(empty.doc().layouts.len(), 1);
+    }
+
+    #[test]
+    fn flowing_text_stays_inside_the_path() {
+        let mut s = Scene::new();
+        let l = s.layout_new();
+        let sh = s.shape_new();
+        // a triangle: text must not appear in the empty top-left corner
+        let shape = s.shape_mut(sh);
+        shape.path = vec![
+            PathOp::MoveTo(0.0, 0.0),
+            PathOp::LineTo(300.0, 300.0),
+            PathOp::LineTo(0.0, 300.0),
+            PathOp::Close,
+        ];
+        shape.stroke = None;
+        shape.flow = true;
+        shape.text = Some("word ".repeat(400));
+        shape.text_color = Rgba::BLACK;
+        s.layout_append(l, sh);
+        s.add_layout(l);
+        let buf = render(&s, 300, 300);
+        let dark = |x0: u32, y0: u32, x1: u32, y1: u32| {
+            (y0..y1)
+                .flat_map(|y| (x0..x1).map(move |x| (x, y)))
+                .filter(|&(x, y)| pixel(&buf, 300, x, y)[0] < 128)
+                .count()
+        };
+        assert!(dark(10, 200, 150, 290) > 100, "text inside the triangle");
+        assert_eq!(dark(200, 0, 300, 100), 0, "nothing outside it");
     }
 
     #[test]
@@ -454,6 +883,14 @@ mod tests {
         s.shape_mut(99).text = Some("x".into());
         s.layout_append(5, 7);
         s.add_layout(3);
+        s.shape_set_image(99, Some(42));
         assert_eq!(s.hit_test(0.0, 0.0), 0);
+        assert!(
+            s.apply(EditOp::SetShape(ShapeDoc {
+                id: 9,
+                ..Default::default()
+            }))
+            .is_err()
+        );
     }
 }

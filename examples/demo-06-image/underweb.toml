@@ -1,0 +1,6 @@
+[package]
+name = "demo-06-image"
+version = "0.1.0"
+kind = "js"
+entry = "main.js"
+description = "demos/06image, ported: PNG and JPEG pictures, scaled, and clipped to a curved shape with text."

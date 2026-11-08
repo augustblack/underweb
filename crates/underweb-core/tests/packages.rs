@@ -67,7 +67,7 @@ fn run(name: &str, sandbox: bool, params: &[(&str, &str)], done: impl Fn(&Run) -
             }
             Some(GuestEvent::Animating(_)) => {}
             Some(GuestEvent::Exited(_)) => r.exited = true,
-            Some(GuestEvent::PermissionRequest { .. }) => {}
+            Some(GuestEvent::PermissionRequest { .. } | GuestEvent::Scene(_)) => {}
             None => {}
         }
     }

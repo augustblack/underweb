@@ -7,9 +7,10 @@
 #include <stdint.h>
 
 // The ABI this header describes. Version 2 appended network and storage
-// functions to [`UwHost`], version 3 audio, version 4 video; packages
-// built for older versions still load.
-#define UW_ABI_VERSION 4
+// functions to [`UwHost`], version 3 audio, version 4 video, version 5
+// transforms, images and text modes; packages built for older versions
+// still load.
+#define UW_ABI_VERSION 5
 
 // The oldest ABI the runner still accepts.
 #define UW_ABI_MIN_VERSION 1
@@ -19,6 +20,13 @@
 #define UW_POINTER_PRESS 1
 
 #define UW_POINTER_RELEASE 2
+
+// [`UwHost::shape_set_text_flags`]: the text is Pango markup.
+#define UW_TEXT_MARKUP 1
+
+// The text flows word by word inside the shape's outline instead of
+// filling its bounding box.
+#define UW_TEXT_FLOW 2
 
 // [`UwNetEvent::kind`]: a TCP connection or listener is up, or a UDP
 // socket is open; `text` is the address.
@@ -114,6 +122,7 @@ typedef struct UwHost {
                          double x3,
                          double y3);
   void (*shape_close_path)(void *ctx, uint32_t shape);
+  // Alpha 0 means no fill (and for the stroke, no stroke).
   void (*shape_set_fill_color)(void *ctx, uint32_t shape, double r, double g, double b, double a);
   void (*shape_set_stroke_color)(void *ctx, uint32_t shape, double r, double g, double b, double a);
   void (*shape_set_stroke_width)(void *ctx, uint32_t shape, double width);
@@ -182,6 +191,31 @@ typedef struct UwHost {
   bool (*media_info)(void *ctx, uint32_t id, struct UwMediaInfo *out);
   // Show video `id` inside the shape (0: none).
   void (*shape_set_video)(void *ctx, uint32_t shape, uint32_t video);
+  // A name for the layout editor.
+  void (*shape_set_name)(void *ctx, uint32_t shape, const char *name);
+  // Where the shape's own coordinates land in the window, as a
+  // `cairo_matrix_t`: x' = xx·x + xy·y + x0, y' = yx·x + yy·y + y0.
+  void (*shape_set_matrix)(void *ctx,
+                           uint32_t shape,
+                           double xx,
+                           double yx,
+                           double xy,
+                           double yy,
+                           double x0,
+                           double y0);
+  // `UW_TEXT_*` flags.
+  void (*shape_set_text_flags)(void *ctx, uint32_t shape, uint32_t flags);
+  // Show image `id` at the shape's origin, clipped to its outline (0:
+  // none). A shape with no outline yet gets the image's rectangle.
+  void (*shape_set_image)(void *ctx, uint32_t shape, uint32_t image);
+  // Load a PNG, JPEG or GIF from the package (relative path); 0 on
+  // failure.
+  uint32_t (*image_open)(void *ctx, const char *path);
+  // Decode an image from memory (from a fetch, say); 0 on failure.
+  uint32_t (*image_from_bytes)(void *ctx, const uint8_t *data, uintptr_t len);
+  bool (*image_size)(void *ctx, uint32_t image, uint32_t *width, uint32_t *height);
+  // Paint the window under the layout's shapes; alpha 0 for none.
+  void (*layout_set_background)(void *ctx, uint32_t layout, double r, double g, double b, double a);
 } UwHost;
 
 typedef struct UwPointerEvent {

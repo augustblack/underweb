@@ -454,6 +454,132 @@ impl Layout {
         (h.layout_append)(h.ctx, self.0, shape.0);
         self
     }
+    /// Paint the window under this layout's shapes (`None`: nothing).
+    pub fn set_background(&self, color: Option<(f64, f64, f64, f64)>) -> &Self {
+        let h = host_v5();
+        let (r, g, b, a) = color.unwrap_or_default();
+        (h.layout_set_background)(h.ctx, self.0, r, g, b, a);
+        self
+    }
+}
+
+fn host_v5() -> &'static UwHost {
+    let h = host();
+    assert!(
+        h.abi_version >= 5,
+        "this browser is too old for transforms and images"
+    );
+    h
+}
+
+/// An affine transform, as `cairo_matrix_t`: (x, y) lands on
+/// (xx·x + xy·y + x0, yx·x + yy·y + y0). Like cairo, each step happens in
+/// the coordinates made by the steps before it.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Matrix {
+    pub xx: f64,
+    pub yx: f64,
+    pub xy: f64,
+    pub yy: f64,
+    pub x0: f64,
+    pub y0: f64,
+}
+
+impl Default for Matrix {
+    fn default() -> Self {
+        Matrix::IDENTITY
+    }
+}
+
+impl Matrix {
+    pub const IDENTITY: Matrix = Matrix {
+        xx: 1.0,
+        yx: 0.0,
+        xy: 0.0,
+        yy: 1.0,
+        x0: 0.0,
+        y0: 0.0,
+    };
+
+    pub const fn new(xx: f64, yx: f64, xy: f64, yy: f64, x0: f64, y0: f64) -> Matrix {
+        Matrix {
+            xx,
+            yx,
+            xy,
+            yy,
+            x0,
+            y0,
+        }
+    }
+
+    /// `self` applied after `first`.
+    pub fn multiply(&self, first: &Matrix) -> Matrix {
+        Matrix {
+            xx: self.xx * first.xx + self.xy * first.yx,
+            yx: self.yx * first.xx + self.yy * first.yx,
+            xy: self.xx * first.xy + self.xy * first.yy,
+            yy: self.yx * first.xy + self.yy * first.yy,
+            x0: self.xx * first.x0 + self.xy * first.y0 + self.x0,
+            y0: self.yx * first.x0 + self.yy * first.y0 + self.y0,
+        }
+    }
+    pub fn translate(&self, x: f64, y: f64) -> Matrix {
+        self.multiply(&Matrix::new(1.0, 0.0, 0.0, 1.0, x, y))
+    }
+    pub fn scale(&self, sx: f64, sy: f64) -> Matrix {
+        self.multiply(&Matrix::new(sx, 0.0, 0.0, sy, 0.0, 0.0))
+    }
+    /// Radians, clockwise on screen.
+    pub fn rotate(&self, angle: f64) -> Matrix {
+        let (s, c) = angle.sin_cos();
+        self.multiply(&Matrix::new(c, s, -s, c, 0.0, 0.0))
+    }
+    pub fn apply(&self, x: f64, y: f64) -> (f64, f64) {
+        (
+            self.xx * x + self.xy * y + self.x0,
+            self.yx * x + self.yy * y + self.y0,
+        )
+    }
+    pub fn invert(&self) -> Option<Matrix> {
+        let d = self.xx * self.yy - self.xy * self.yx;
+        if d == 0.0 || !d.is_finite() {
+            return None;
+        }
+        let (xx, xy, yx, yy) = (self.yy / d, -self.xy / d, -self.yx / d, self.xx / d);
+        Some(Matrix::new(
+            xx,
+            yx,
+            xy,
+            yy,
+            -(xx * self.x0 + xy * self.y0),
+            -(yx * self.x0 + yy * self.y0),
+        ))
+    }
+}
+
+/// A decoded picture (PNG, JPEG or GIF), shown with [`Shape::set_image`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct Image(pub u32);
+
+impl Image {
+    /// A file in the package. `None` if it can't be read or decoded (the
+    /// reason goes to the page's log).
+    pub fn open(path: &str) -> Option<Image> {
+        let h = host_v5();
+        let id = (h.image_open)(h.ctx, cstring(path).as_ptr());
+        (id != 0).then_some(Image(id))
+    }
+    pub fn from_bytes(data: &[u8]) -> Option<Image> {
+        let h = host_v5();
+        let id = (h.image_from_bytes)(h.ctx, data.as_ptr(), data.len());
+        (id != 0).then_some(Image(id))
+    }
+    pub fn size(&self) -> (u32, u32) {
+        let h = host_v5();
+        let (mut w, mut hh) = (0, 0);
+        (h.image_size)(h.ctx, self.0, &mut w, &mut hh);
+        (w, hh)
+    }
 }
 
 /// A path with fill, stroke and text. Cheap to copy: it's a handle.
@@ -498,16 +624,54 @@ impl Shape {
         (h.shape_set_text)(h.ctx, self.0, cstring(text).as_ptr());
         self
     }
-    /// A pango font description such as `"Serif Bold 18"`.
     /// Show a video inside the shape, or none.
     pub fn set_video(&self, video: Option<video::Video>) -> &Self {
         let h = host_v4();
         (h.shape_set_video)(h.ctx, self.0, video.map_or(0, |v| v.0));
         self
     }
+    /// A pango font description such as `"Serif Bold 18"`.
     pub fn set_font(&self, font: &str) -> &Self {
         let h = host();
         (h.shape_set_font)(h.ctx, self.0, cstring(font).as_ptr());
+        self
+    }
+    /// A circle made of four Bezier arcs.
+    pub fn circle(&self, cx: f64, cy: f64, r: f64) -> &Self {
+        let k = 0.5523 * r;
+        self.move_to(cx + r, cy)
+            .curve_to(cx + r, cy + k, cx + k, cy + r, cx, cy + r)
+            .curve_to(cx - k, cy + r, cx - r, cy + k, cx - r, cy)
+            .curve_to(cx - r, cy - k, cx - k, cy - r, cx, cy - r)
+            .curve_to(cx + k, cy - r, cx + r, cy - k, cx + r, cy)
+            .close_path()
+    }
+    /// Shown in the layout editor.
+    pub fn set_name(&self, name: &str) -> &Self {
+        let h = host_v5();
+        (h.shape_set_name)(h.ctx, self.0, cstring(name).as_ptr());
+        self
+    }
+    /// From the shape's own coordinates to the window's.
+    pub fn set_matrix(&self, m: Matrix) -> &Self {
+        let h = host_v5();
+        (h.shape_set_matrix)(h.ctx, self.0, m.xx, m.yx, m.xy, m.yy, m.x0, m.y0);
+        self
+    }
+    /// `markup`: the text is Pango markup. `flow`: it flows word by word
+    /// inside the outline instead of its bounding box.
+    pub fn set_text_mode(&self, markup: bool, flow: bool) -> &Self {
+        let h = host_v5();
+        let flags =
+            if markup { abi::UW_TEXT_MARKUP } else { 0 } | if flow { abi::UW_TEXT_FLOW } else { 0 };
+        (h.shape_set_text_flags)(h.ctx, self.0, flags);
+        self
+    }
+    /// Draw an image at the shape's origin, clipped to the outline. A
+    /// shape with no outline yet gets the image's rectangle.
+    pub fn set_image(&self, image: Option<Image>) -> &Self {
+        let h = host_v5();
+        (h.shape_set_image)(h.ctx, self.0, image.map_or(0, |i| i.0));
         self
     }
 }

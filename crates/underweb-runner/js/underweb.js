@@ -7,6 +7,9 @@ const ops = core.ops;
 
 const shapes = new Map();
 
+const bytes = (d) =>
+  d instanceof Uint8Array ? d : typeof d === "string" ? core.encode(d) : new Uint8Array(d);
+
 class Layout {
   constructor() {
     this.id = ops.op_uw_layout_new();
@@ -15,12 +18,72 @@ class Layout {
     ops.op_uw_layout_append(this.id, shape.id);
     return this;
   }
+  /** Paint the window under this layout's shapes (no arguments: none). */
+  setBackground(r, g, b, a = 1) {
+    if (r === undefined) ops.op_uw_layout_set_background(this.id, 0, 0, 0, 0);
+    else ops.op_uw_layout_set_background(this.id, r, g, b, a);
+    return this;
+  }
+}
+
+/** An affine transform, as cairo_matrix_t. Methods return new matrices;
+ * like cairo, each step happens in the coordinates the earlier ones made. */
+class Matrix {
+  constructor(xx = 1, yx = 0, xy = 0, yy = 1, x0 = 0, y0 = 0) {
+    Object.assign(this, { xx, yx, xy, yy, x0, y0 });
+    Object.freeze(this);
+  }
+  /** `this` applied after `m`. */
+  multiply(m) {
+    return new Matrix(
+      this.xx * m.xx + this.xy * m.yx,
+      this.yx * m.xx + this.yy * m.yx,
+      this.xx * m.xy + this.xy * m.yy,
+      this.yx * m.xy + this.yy * m.yy,
+      this.xx * m.x0 + this.xy * m.y0 + this.x0,
+      this.yx * m.x0 + this.yy * m.y0 + this.y0,
+    );
+  }
+  translate(x, y) { return this.multiply(new Matrix(1, 0, 0, 1, x, y)); }
+  scale(sx, sy = sx) { return this.multiply(new Matrix(sx, 0, 0, sy, 0, 0)); }
+  /** Radians, clockwise on screen. */
+  rotate(a) {
+    const c = Math.cos(a), s = Math.sin(a);
+    return this.multiply(new Matrix(c, s, -s, c, 0, 0));
+  }
+  /** Where the point (x, y) lands. */
+  apply(x, y) {
+    return [this.xx * x + this.xy * y + this.x0, this.yx * x + this.yy * y + this.y0];
+  }
+  invert() {
+    const d = this.xx * this.yy - this.xy * this.yx;
+    if (!d) return null;
+    const xx = this.yy / d, xy = -this.xy / d, yx = -this.yx / d, yy = this.xx / d;
+    return new Matrix(xx, yx, xy, yy, -(xx * this.x0 + xy * this.y0), -(yx * this.x0 + yy * this.y0));
+  }
+}
+
+/** A decoded picture: a package file or bytes (PNG, JPEG, GIF). */
+class Image {
+  constructor(id) {
+    this.id = id;
+    const size = ops.op_uw_image_size(id) ?? [0, 0];
+    this.width = size[0];
+    this.height = size[1];
+  }
+  /** Load a file from the package; throws if it can't. */
+  static open(path) { return new Image(ops.op_uw_image_open(String(path))); }
+  static fromBytes(data) { return new Image(ops.op_uw_image_from_bytes(bytes(data))); }
 }
 
 class Shape {
+  #name = "";
+  #matrix = new Matrix();
+  #markup = false;
+  #flow = false;
+  #image = null;
   constructor() {
     this.id = ops.op_uw_shape_new();
-    this.name = "";
     shapes.set(this.id, this);
   }
   clearPath() { ops.op_uw_shape_clear_path(this.id); return this; }
@@ -32,6 +95,16 @@ class Shape {
     return this;
   }
   closePath() { ops.op_uw_shape_close_path(this.id); return this; }
+  /** A circle from four Bezier arcs. */
+  circle(cx, cy, r) {
+    const k = 0.5523 * r;
+    return this.moveTo(cx + r, cy)
+      .curveTo(cx + r, cy + k, cx + k, cy + r, cx, cy + r)
+      .curveTo(cx - k, cy + r, cx - r, cy + k, cx - r, cy)
+      .curveTo(cx - r, cy - k, cx - k, cy - r, cx, cy - r)
+      .curveTo(cx + k, cy - r, cx + r, cy - k, cx + r, cy)
+      .closePath();
+  }
   setFillColor(r, g, b, a = 1) { ops.op_uw_shape_set_fill_color(this.id, r, g, b, a); return this; }
   setStrokeColor(r, g, b, a = 1) { ops.op_uw_shape_set_stroke_color(this.id, r, g, b, a); return this; }
   setTextColor(r, g, b, a = 1) { ops.op_uw_shape_set_text_color(this.id, r, g, b, a); return this; }
@@ -40,6 +113,31 @@ class Shape {
   set font(f) { ops.op_uw_shape_set_font(this.id, String(f)); }
   /** Show a video inside the shape (null to stop). */
   set video(v) { ops.op_uw_shape_set_video(this.id, v ? v.id : 0); }
+  get name() { return this.#name; }
+  set name(n) { this.#name = String(n); ops.op_uw_shape_set_name(this.id, this.#name); }
+  /** Text is Pango markup: <b>, <span foreground="red">... */
+  get markup() { return this.#markup; }
+  set markup(on) { this.#markup = !!on; this.#textMode(); }
+  /** Text flows word by word inside the outline. */
+  get flow() { return this.#flow; }
+  set flow(on) { this.#flow = !!on; this.#textMode(); }
+  #textMode() { ops.op_uw_shape_set_text_mode(this.id, this.#markup, this.#flow); }
+  /** An Image at the shape's origin, clipped to its outline. A shape
+   * with no outline gets the image's rectangle. */
+  get image() { return this.#image; }
+  set image(img) { this.#image = img; ops.op_uw_shape_set_image(this.id, img ? img.id : 0); }
+  /** From the shape's coordinates to the window's. */
+  get matrix() { return this.#matrix; }
+  set matrix(m) {
+    this.#matrix = m;
+    ops.op_uw_shape_set_matrix(this.id, m.xx, m.yx, m.xy, m.yy, m.x0, m.y0);
+  }
+  translate(x, y) { this.matrix = this.#matrix.translate(x, y); return this; }
+  scale(sx, sy = sx) { this.matrix = this.#matrix.scale(sx, sy); return this; }
+  rotate(a) { this.matrix = this.#matrix.rotate(a); return this; }
+  resetTransform() { this.matrix = new Matrix(); return this; }
+  /** A window point in the shape's own coordinates. */
+  toLocal(x, y) { return (this.#matrix.invert() ?? new Matrix()).apply(x, y); }
 }
 
 const window = {
@@ -58,8 +156,6 @@ const window = {
 // permissions in underweb.toml and asks the user. Requests resolve or
 // reject when the browser answers.
 
-const bytes = (d) =>
-  d instanceof Uint8Array ? d : typeof d === "string" ? core.encode(d) : new Uint8Array(d);
 
 const pending = new Map(); // handle -> { resolve, reject }
 const handles = new Map(); // handle -> Connection | Listener | UdpSocket
@@ -302,6 +398,18 @@ function mediaEvent(id, ev) {
   }
 }
 
+// UTF-8 only, which is all the web uses
+class TextEncoder {
+  get encoding() { return "utf-8"; }
+  encode(s = "") { return core.encode(String(s)); }
+}
+class TextDecoder {
+  get encoding() { return "utf-8"; }
+  decode(b) { return b ? core.decode(b instanceof Uint8Array ? b : new Uint8Array(b.buffer ?? b)) : ""; }
+}
+globalThis.TextEncoder = TextEncoder;
+globalThis.TextDecoder = TextDecoder;
+
 globalThis.console = {
   log: window.log,
   info: window.log,
@@ -327,7 +435,7 @@ core.setUnhandledPromiseRejectionHandler((_promise, reason) => {
   return true;
 });
 
-const api = { Layout, Shape, window, net, storage, audio, video, dispatch, netEvents, pdMessages, mediaEvent };
+const api = { Layout, Shape, Matrix, Image, window, net, storage, audio, video, dispatch, netEvents, pdMessages, mediaEvent };
 Object.defineProperty(globalThis, "__uw", { value: api });
 
 // Packages get no Deno internals: only the API above.

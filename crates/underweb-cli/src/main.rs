@@ -6,6 +6,8 @@
 //!                                         add the package to a static repository
 //! uw serve   REPO [--port 8000]           serve a repository for testing
 //! uw open    ADDRESS                      resolve an address, print where it landed
+//! uw export  DIR --lang js|ts|rust|c --out DIR [--name NAME]
+//!                                         write the page's scene as a new package
 //!
 //! uw key                                  show (or create) your signing key
 //! uw link-bluesky HANDLE                  declare your key on your Bluesky account
@@ -30,7 +32,8 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result, bail};
 use underweb_core::trust_types::lists::List;
 use underweb_core::trust_types::{Identity, Kind, Level, Statement};
-use underweb_core::{Store, Trust, sign_release};
+use underweb_core::{Guest, PermissionPolicy, SpawnOptions, Store, Trust, sign_release};
+use underweb_export::Lang;
 use underweb_pkg::{Package, PublishOptions, publish};
 
 fn main() {
@@ -50,6 +53,7 @@ const USAGE: &str = "usage:
   uw publish [DIR] --repo REPO [--source-only|--target-only] [--sign [--as ID]]
   uw serve REPO [--port 8000]
   uw open ADDRESS
+  uw export DIR --lang js|ts|rust|c --out DIR [--name NAME]
   uw key
   uw link-bluesky HANDLE
   uw vouch ADDRESS [--level used|reviewed|warn] [--note TEXT] (--list FILE [--name NAME] | --bluesky HANDLE)
@@ -70,6 +74,8 @@ struct Opts {
     list: Option<String>,
     name: Option<String>,
     bluesky: Option<String>,
+    lang: Option<String>,
+    out: Option<PathBuf>,
 }
 
 fn parse(rest: &[String]) -> Result<Opts> {
@@ -97,6 +103,8 @@ fn parse(rest: &[String]) -> Result<Opts> {
             "--list" => o.list = Some(val()?),
             "--name" => o.name = Some(val()?),
             "--bluesky" => o.bluesky = Some(val()?),
+            "--lang" => o.lang = Some(val()?),
+            "--out" => o.out = Some(PathBuf::from(val()?)),
             "-h" | "--help" => usage(),
             s if s.starts_with("--") => bail!("unknown option {s}"),
             s => o.positional.push(s.to_string()),
@@ -122,6 +130,33 @@ fn run(args: Vec<String>) -> Result<()> {
     let dir = || PathBuf::from(first().unwrap_or_else(|| ".".into()));
     let progress = |l: &str| eprintln!("  {l}");
     match cmd.as_str() {
+        "export" => {
+            let lang = o.lang.as_deref().unwrap_or("js");
+            let lang = Lang::parse(lang).with_context(|| format!("no language {lang:?}"))?;
+            let out = o.out.clone().context("export needs --out DIR")?;
+            let src = Package::open(dir())?;
+            let name = match &o.name {
+                Some(n) => n.clone(),
+                None => out
+                    .file_name()
+                    .map(|n| n.to_string_lossy().to_lowercase())
+                    .filter(|n| underweb_pkg::valid_name(n))
+                    .unwrap_or_else(|| format!("{}-{}", src.name(), lang.label().to_lowercase())),
+            };
+            let doc = Guest::read_scene(
+                &src.dir,
+                SpawnOptions {
+                    permissions: PermissionPolicy::DenyAll,
+                    remember_grants: false,
+                    mixer: Some(underweb_core::Mixer::new(48000, 2)),
+                    ..Default::default()
+                },
+            )?;
+            for note in underweb_export::write(&doc, lang, &name, Some(&src.dir), &out)? {
+                eprintln!("  note: {note}");
+            }
+            println!("{}", out.display());
+        }
         "build" => {
             let pkg = Package::open(dir())?;
             Store::new(Store::default_root()).build(&pkg, &progress)?;

@@ -1,0 +1,10 @@
+[package]
+name = "demo-10-chat"
+version = "0.1.0"
+kind = "ts"
+entry = "main.ts"
+description = "demos/10server + 10client, ported: a TCP server and a client in one page, talking over localhost."
+
+[permissions]
+net.tcp.listen = [7007]
+net.tcp.connect = ["127.0.0.1:7007"]

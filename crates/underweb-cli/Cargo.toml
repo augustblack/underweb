@@ -13,4 +13,5 @@ path = "src/main.rs"
 anyhow.workspace = true
 underweb-core.workspace = true
 underweb-pkg.workspace = true
+underweb-export.workspace = true
 tiny_http = "0.12"

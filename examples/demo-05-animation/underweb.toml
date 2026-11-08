@@ -1,0 +1,6 @@
+[package]
+name = "demo-05-animation"
+version = "0.1.0"
+kind = "ts"
+entry = "main.ts"
+description = "demos/05animation, ported: a curve that breathes, redrawn every display frame."

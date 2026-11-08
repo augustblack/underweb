@@ -1,0 +1,6 @@
+[package]
+name = "demo-09-sliders"
+version = "0.1.0"
+kind = "js"
+entry = "main.js"
+description = "demos/09widgets, ported: sliders made of shapes set a shape's colour and the background."

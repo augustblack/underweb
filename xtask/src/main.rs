@@ -12,6 +12,7 @@ use anyhow::{Context, Result, bail};
 
 const NATIVE_RUST_EXAMPLES: &[&str] = &[
     "hello-rust",
+    "demo-08-draw",
     "probe-rust",
     "probe-net-rust",
     "probe-audio-rust",

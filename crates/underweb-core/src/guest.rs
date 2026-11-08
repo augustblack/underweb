@@ -7,7 +7,7 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use underweb_audio::AudioRing;
 use underweb_audio::mixer::{Mixer, Source};
-use underweb_ipc::{Channel, GuestMsg, HostMsg, Shm, argb32_stride};
+use underweb_ipc::{Channel, EditOp, GuestMsg, HostMsg, SceneDoc, Shm, argb32_stride};
 use underweb_pkg::{Package, Permission};
 
 use crate::broker::{Broker, Decision, GrantState, PermissionPolicy};
@@ -87,6 +87,9 @@ pub enum GuestEvent {
         /// "connect to example.org on port 7000"
         description: String,
     },
+    /// The page's scene, while the layout editor is open
+    /// ([`Guest::set_edit_mode`]).
+    Scene(SceneDoc),
 }
 
 struct Buffers {
@@ -322,6 +325,49 @@ impl Guest {
             .send(&HostMsg::Pointer { kind, button, x, y }, None)
     }
 
+    /// Open or close the layout editor: while open, the page gets no
+    /// pointer events and its scene arrives as [`GuestEvent::Scene`].
+    pub fn set_edit_mode(&self, on: bool) -> Result<()> {
+        self.chan.send(&HostMsg::EditMode(on), None)
+    }
+
+    /// Change the page's scene from the layout editor.
+    pub fn edit(&self, op: EditOp) -> Result<()> {
+        self.chan.send(&HostMsg::Edit(Box::new(op)), None)
+    }
+
+    /// Run a package without a window just long enough to read its scene
+    /// (for exporting it). Permission requests are refused.
+    pub fn read_scene(package_dir: impl AsRef<Path>, opts: SpawnOptions) -> Result<SceneDoc> {
+        let mut g = Guest::spawn(package_dir, opts)?;
+        let result = (|| {
+            g.configure(960, 640, 1.0)?;
+            g.set_edit_mode(true)?;
+            let deadline = std::time::Instant::now() + Duration::from_secs(20);
+            let mut doc = None;
+            // a page may build its scene over a few events; wait until it settles
+            let mut quiet_since = std::time::Instant::now();
+            while std::time::Instant::now() < deadline {
+                match g.next_event(Duration::from_millis(50)) {
+                    Some(GuestEvent::Scene(d)) => {
+                        doc = Some(d);
+                        quiet_since = std::time::Instant::now();
+                    }
+                    Some(GuestEvent::Error(e)) => anyhow::bail!("the page failed: {e}"),
+                    Some(GuestEvent::Exited(_)) => break,
+                    Some(GuestEvent::PermissionRequest { id, .. }) => g.answer(id, Decision::Deny),
+                    _ => {}
+                }
+                if doc.is_some() && quiet_since.elapsed() > Duration::from_millis(400) {
+                    break;
+                }
+            }
+            doc.context("the page showed nothing")
+        })();
+        g.shutdown();
+        result
+    }
+
     pub fn try_event(&self) -> Option<GuestEvent> {
         self.events.try_recv().ok().map(|e| self.newest(e))
     }
@@ -458,6 +504,7 @@ fn read_loop(
             GuestMsg::Animating(on) => send(GuestEvent::Animating(on)),
             GuestMsg::Log(l) => send(GuestEvent::Log(l)),
             GuestMsg::Error(e) => send(GuestEvent::Error(e)),
+            GuestMsg::Scene(doc) => send(GuestEvent::Scene(doc)),
             GuestMsg::Net { handle, op } => broker.request(handle, op),
             GuestMsg::AudioStart => {
                 if let Err(e) = sound.start(chan) {

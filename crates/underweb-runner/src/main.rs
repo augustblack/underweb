@@ -101,6 +101,7 @@ fn run(chan: &Channel, args: Args) -> Result<()> {
         .borrow_mut()
         .params
         .extend(args.params.iter().cloned());
+    scene.borrow_mut().package_dir = Some(pkg.dir.clone());
 
     let lock = |chan: &Channel| -> Result<()> {
         if args.sandbox {

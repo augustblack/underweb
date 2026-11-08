@@ -1,0 +1,6 @@
+[package]
+name = "demo-03-shapes"
+version = "0.1.0"
+kind = "js"
+entry = "main.js"
+description = "demos/03shape, ported: text flowing inside curved and rotated shapes. Made for the layout editor: open it and press Edit."

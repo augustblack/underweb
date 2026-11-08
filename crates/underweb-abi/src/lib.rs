@@ -22,15 +22,22 @@
 use std::ffi::{c_char, c_void};
 
 /// The ABI this header describes. Version 2 appended network and storage
-/// functions to [`UwHost`], version 3 audio, version 4 video; packages
-/// built for older versions still load.
-pub const UW_ABI_VERSION: u32 = 4;
+/// functions to [`UwHost`], version 3 audio, version 4 video, version 5
+/// transforms, images and text modes; packages built for older versions
+/// still load.
+pub const UW_ABI_VERSION: u32 = 5;
 /// The oldest ABI the runner still accepts.
 pub const UW_ABI_MIN_VERSION: u32 = 1;
 
 pub const UW_POINTER_MOVE: u32 = 0;
 pub const UW_POINTER_PRESS: u32 = 1;
 pub const UW_POINTER_RELEASE: u32 = 2;
+
+/// [`UwHost::shape_set_text_flags`]: the text is Pango markup.
+pub const UW_TEXT_MARKUP: u32 = 1;
+/// The text flows word by word inside the shape's outline instead of
+/// filling its bounding box.
+pub const UW_TEXT_FLOW: u32 = 2;
 
 /// [`UwNetEvent::kind`]: a TCP connection or listener is up, or a UDP
 /// socket is open; `text` is the address.
@@ -177,6 +184,7 @@ pub struct UwHost {
         y3: f64,
     ),
     pub shape_close_path: extern "C" fn(ctx: *mut c_void, shape: u32),
+    /// Alpha 0 means no fill (and for the stroke, no stroke).
     pub shape_set_fill_color:
         extern "C" fn(ctx: *mut c_void, shape: u32, r: f64, g: f64, b: f64, a: f64),
     pub shape_set_stroke_color:
@@ -265,6 +273,37 @@ pub struct UwHost {
     pub media_info: extern "C" fn(ctx: *mut c_void, id: u32, out: *mut UwMediaInfo) -> bool,
     /// Show video `id` inside the shape (0: none).
     pub shape_set_video: extern "C" fn(ctx: *mut c_void, shape: u32, video: u32),
+
+    // ---- ABI 5: transforms, images, text modes ----
+    /// A name for the layout editor.
+    pub shape_set_name: extern "C" fn(ctx: *mut c_void, shape: u32, name: *const c_char),
+    /// Where the shape's own coordinates land in the window, as a
+    /// `cairo_matrix_t`: x' = xx·x + xy·y + x0, y' = yx·x + yy·y + y0.
+    pub shape_set_matrix: extern "C" fn(
+        ctx: *mut c_void,
+        shape: u32,
+        xx: f64,
+        yx: f64,
+        xy: f64,
+        yy: f64,
+        x0: f64,
+        y0: f64,
+    ),
+    /// `UW_TEXT_*` flags.
+    pub shape_set_text_flags: extern "C" fn(ctx: *mut c_void, shape: u32, flags: u32),
+    /// Show image `id` at the shape's origin, clipped to its outline (0:
+    /// none). A shape with no outline yet gets the image's rectangle.
+    pub shape_set_image: extern "C" fn(ctx: *mut c_void, shape: u32, image: u32),
+    /// Load a PNG, JPEG or GIF from the package (relative path); 0 on
+    /// failure.
+    pub image_open: extern "C" fn(ctx: *mut c_void, path: *const c_char) -> u32,
+    /// Decode an image from memory (from a fetch, say); 0 on failure.
+    pub image_from_bytes: extern "C" fn(ctx: *mut c_void, data: *const u8, len: usize) -> u32,
+    pub image_size:
+        extern "C" fn(ctx: *mut c_void, image: u32, width: *mut u32, height: *mut u32) -> bool,
+    /// Paint the window under the layout's shapes; alpha 0 for none.
+    pub layout_set_background:
+        extern "C" fn(ctx: *mut c_void, layout: u32, r: f64, g: f64, b: f64, a: f64),
 }
 
 pub type UwAbiVersionFn = unsafe extern "C" fn() -> u32;

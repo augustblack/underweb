@@ -14,16 +14,18 @@
 
 mod channel;
 mod media;
+pub mod scene;
 mod shm;
 
 pub use channel::Channel;
 pub use media::{Broadcast, FromMedia, MAX_PIXELS, MediaCmd, MediaEvent, ToMedia, VideoMailbox};
+pub use scene::{EditOp, LayoutDoc, Matrix, PathOp, Rgba, SceneDoc, ShapeDoc};
 pub use shm::Shm;
 
 use serde::{Deserialize, Serialize};
 
 /// Bumped on any incompatible protocol change.
-pub const PROTOCOL_VERSION: u32 = 1;
+pub const PROTOCOL_VERSION: u32 = 2;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum HostMsg {
@@ -61,6 +63,12 @@ pub enum HostMsg {
     AudioReady {
         capacity: u32,
     },
+    /// The layout editor opened or closed. While it is open the page gets
+    /// no pointer events and the runner sends [`GuestMsg::Scene`] whenever
+    /// the scene changes.
+    EditMode(bool),
+    /// A change made in the layout editor.
+    Edit(Box<EditOp>),
     /// The host is done with a frame buffer.
     Release {
         generation: u32,
@@ -108,6 +116,8 @@ pub enum GuestMsg {
         id: u32,
         cmd: MediaCmd,
     },
+    /// The scene, for the layout editor (edit mode only).
+    Scene(SceneDoc),
 }
 
 /// What a package asks the host to do. The host checks each against the

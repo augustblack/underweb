@@ -32,5 +32,6 @@ pub use store::{Origin, Resolved, Store, Subject};
 pub use trust::{DomainAdapter, Trust, sign_release};
 pub use underweb_abi::{UW_POINTER_MOVE, UW_POINTER_PRESS, UW_POINTER_RELEASE};
 pub use underweb_audio::mixer::Mixer;
+pub use underweb_ipc::scene;
 pub use underweb_pkg::{Kind, Package, Permission};
 pub use underweb_trust::{self as trust_types, Verdict};

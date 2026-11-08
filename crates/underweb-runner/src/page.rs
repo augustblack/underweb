@@ -7,7 +7,7 @@ use underweb_abi::UwPointerEvent;
 use underweb_audio::pd::PdMessage;
 use underweb_audio::{AudioRing, pd};
 use underweb_guest::{Scene, cairo};
-use underweb_ipc::{Channel, GuestMsg, HostMsg, MediaEvent, NetEvent, Shm, VideoMailbox};
+use underweb_ipc::{Channel, GuestMsg, HostMsg, MediaEvent, NetEvent, SceneDoc, Shm, VideoMailbox};
 
 use crate::audio::Audio;
 
@@ -47,6 +47,8 @@ pub fn run(
     let mut frames: Option<Frames> = None;
     let mut title = String::new();
     let mut animating = false;
+    // while the layout editor is open: the scene it saw last
+    let mut editing: Option<SceneDoc> = None;
 
     loop {
         // report window state changes
@@ -66,7 +68,11 @@ pub fn run(
         if new_video_frame {
             scene.borrow_mut().request_redraw();
         }
-        draw_if_needed(chan, scene, page, frames.as_mut())?;
+        if draw_if_needed(chan, scene, page, frames.as_mut())?
+            && let Some(sent) = editing.as_mut()
+        {
+            send_doc(chan, scene, sent)?;
+        }
 
         // while sound runs, look for Pd's messages every 20 ms
         let msgs = if pd::is_started() {
@@ -112,6 +118,8 @@ pub fn run(
                 s.request_redraw();
             }
             HostMsg::Tick { dt } => page.update(dt).context("update")?,
+            // the editor has the pointer while it is open
+            HostMsg::Pointer { .. } if editing.is_some() => {}
             HostMsg::Pointer { kind, button, x, y } => {
                 let shape = scene.borrow().hit_test(x, y);
                 page.pointer(&UwPointerEvent {
@@ -142,6 +150,21 @@ pub fn run(
                 let shm = Shm::from_fd(fd, AudioRing::bytes_for(capacity as usize))?;
                 audio.attach(AudioRing::open(shm)?);
             }
+            HostMsg::EditMode(on) => {
+                editing = on.then(SceneDoc::default);
+                if let Some(sent) = editing.as_mut() {
+                    send_doc(chan, scene, sent)?;
+                }
+            }
+            HostMsg::Edit(op) => {
+                if let Err(e) = scene.borrow_mut().apply(*op) {
+                    chan.send(&GuestMsg::Log(format!("editor: {e}")), None)?;
+                }
+                // even a refused edit: the editor resyncs with the scene
+                if let Some(sent) = editing.as_mut() {
+                    *sent = SceneDoc::default();
+                }
+            }
             HostMsg::Shutdown => break,
         }
     }
@@ -150,20 +173,31 @@ pub fn run(
     Ok(())
 }
 
+/// Send the scene to the editor if it changed since `sent`.
+fn send_doc(chan: &Channel, scene: &RefCell<Scene>, sent: &mut SceneDoc) -> Result<()> {
+    let doc = scene.borrow().doc();
+    if doc != *sent {
+        chan.send(&GuestMsg::Scene(doc.clone()), None)?;
+        *sent = doc;
+    }
+    Ok(())
+}
+
+/// Draw if the scene changed; true if a frame was sent.
 fn draw_if_needed(
     chan: &Channel,
     scene: &RefCell<Scene>,
     page: &mut dyn Page,
     frames: Option<&mut Frames>,
-) -> Result<()> {
-    let Some(f) = frames else { return Ok(()) };
+) -> Result<bool> {
+    let Some(f) = frames else { return Ok(false) };
     if !scene.borrow_mut().take_dirty() {
-        return Ok(());
+        return Ok(false);
     }
     let Some(index) = f.free.iter().position(|&free| free) else {
         // both buffers are with the host; draw when one comes back
         scene.borrow_mut().request_redraw();
-        return Ok(());
+        return Ok(false);
     };
     let buf_len = f.stride as usize * f.height as usize;
     let ptr = unsafe { f.shm.as_ptr().add(index * buf_len) };
@@ -183,5 +217,6 @@ fn draw_if_needed(
             index: index as u32,
         },
         None,
-    )
+    )?;
+    Ok(true)
 }

@@ -1,0 +1,18 @@
+[package]
+name = "demo-08-draw"
+version = "0.1.0"
+kind = "rust"
+description = "demos/08draw_cb, ported to Rust: a shape plus animated raw cairo drawing inside it."
+
+# filled in by `cargo xtask examples`
+[targets.aarch64-apple-darwin]
+file = "dist/aarch64-apple-darwin/libdemo_08_draw.dylib"
+
+[targets.x86_64-apple-darwin]
+file = "dist/x86_64-apple-darwin/libdemo_08_draw.dylib"
+
+[targets.x86_64-unknown-linux-gnu]
+file = "dist/x86_64-unknown-linux-gnu/libdemo_08_draw.so"
+
+[targets.aarch64-unknown-linux-gnu]
+file = "dist/aarch64-unknown-linux-gnu/libdemo_08_draw.so"

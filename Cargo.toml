@@ -9,6 +9,7 @@ members = [
     "examples/probe-net-rust",
     "examples/probe-audio-rust",
     "examples/probe-video-rust",
+    "examples/demo-08-draw",
 ]
 
 [workspace.package]
@@ -27,6 +28,7 @@ underweb-core = { path = "crates/underweb-core" }
 underweb-capi = { path = "crates/underweb-capi" }
 underweb-audio = { path = "crates/underweb-audio" }
 underweb-media = { path = "crates/underweb-media" }
+underweb-export = { path = "crates/underweb-export" }
 
 anyhow = "1"
 serde = { version = "1", features = ["derive"] }

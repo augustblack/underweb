@@ -1,0 +1,6 @@
+[package]
+name = "demo-13-tree"
+version = "0.1.0"
+kind = "js"
+entry = "main.js"
+description = "demos/13gui, ported: a tree list with columns, made of shapes. Click a category to open or close it."

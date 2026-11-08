@@ -1,0 +1,6 @@
+[package]
+name = "demo-02-text"
+version = "0.1.0"
+kind = "ts"
+entry = "main.ts"
+description = "demos/02shape, ported: Pango markup and text in many scripts."

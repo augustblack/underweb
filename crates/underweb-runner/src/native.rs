@@ -9,7 +9,7 @@ use std::rc::Rc;
 use anyhow::{Context, Result, bail};
 use libloading::Library;
 use underweb_abi::*;
-use underweb_guest::{PathOp, Rgba, Scene, Shape, cairo};
+use underweb_guest::{Matrix, PathOp, Rgba, Scene, Shape, cairo};
 use underweb_ipc::{Channel, GuestMsg, NetEvent, NetEventKind, NetOp};
 
 use crate::audio::Audio;
@@ -329,10 +329,10 @@ extern "C" fn shape_close_path(p: *mut c_void, id: u32) {
     shape(p, id, |s| s.path.push(PathOp::Close))
 }
 extern "C" fn shape_set_fill_color(p: *mut c_void, id: u32, r: f64, g: f64, b: f64, a: f64) {
-    shape(p, id, |s| s.fill = Some(Rgba(r, g, b, a)))
+    shape(p, id, |s| s.fill = underweb_guest::paint(r, g, b, a))
 }
 extern "C" fn shape_set_stroke_color(p: *mut c_void, id: u32, r: f64, g: f64, b: f64, a: f64) {
-    shape(p, id, |s| s.stroke = Some(Rgba(r, g, b, a)))
+    shape(p, id, |s| s.stroke = underweb_guest::paint(r, g, b, a))
 }
 extern "C" fn shape_set_stroke_width(p: *mut c_void, id: u32, w: f64) {
     shape(p, id, |s| s.stroke_width = w)
@@ -527,7 +527,10 @@ extern "C" fn pd_subscribe(p: *mut c_void, r: *const c_char) {
 // ---- video ----
 
 extern "C" fn media_open(p: *mut c_void, source: *const c_char, looping: bool) -> u32 {
-    ctx(p).media.open(&string(source), looping, None)
+    let source = string(source);
+    let id = ctx(p).media.open(&source, looping, None);
+    with_scene(p, |s| s.video_source(id, &source));
+    id
 }
 extern "C" fn media_broadcast(
     p: *mut c_void,
@@ -535,14 +538,17 @@ extern "C" fn media_broadcast(
     url: *const c_char,
     password: *const c_char,
 ) -> u32 {
-    ctx(p).media.open(
-        &string(source),
+    let source = string(source);
+    let id = ctx(p).media.open(
+        &source,
         false,
         Some(Broadcast {
             url: string(url),
             password: string(password),
         }),
-    )
+    );
+    with_scene(p, |s| s.video_source(id, &source));
+    id
 }
 extern "C" fn media_play(p: *mut c_void, id: u32) {
     ctx(p).media.cmd(id, MediaCmd::Play)
@@ -576,6 +582,84 @@ extern "C" fn media_info(p: *mut c_void, id: u32, out: *mut UwMediaInfo) -> bool
 }
 extern "C" fn shape_set_video(p: *mut c_void, shape_id: u32, video: u32) {
     shape(p, shape_id, |s| s.video = (video != 0).then_some(video))
+}
+
+// ---- ABI 5 ----
+
+extern "C" fn shape_set_name(p: *mut c_void, id: u32, name: *const c_char) {
+    shape(p, id, |s| s.name = string(name))
+}
+#[allow(clippy::too_many_arguments)]
+extern "C" fn shape_set_matrix(
+    p: *mut c_void,
+    id: u32,
+    xx: f64,
+    yx: f64,
+    xy: f64,
+    yy: f64,
+    x0: f64,
+    y0: f64,
+) {
+    let m = Matrix {
+        xx,
+        yx,
+        xy,
+        yy,
+        x0,
+        y0,
+    };
+    if [xx, yx, xy, yy, x0, y0].iter().all(|v| v.is_finite()) {
+        shape(p, id, |s| s.matrix = m)
+    }
+}
+extern "C" fn shape_set_text_flags(p: *mut c_void, id: u32, flags: u32) {
+    shape(p, id, |s| {
+        s.markup = flags & UW_TEXT_MARKUP != 0;
+        s.flow = flags & UW_TEXT_FLOW != 0;
+    })
+}
+extern "C" fn shape_set_image(p: *mut c_void, id: u32, image: u32) {
+    with_scene(p, |s| s.shape_set_image(id, (image != 0).then_some(image)))
+}
+extern "C" fn image_open(p: *mut c_void, path: *const c_char) -> u32 {
+    let r = with_scene(p, |s| Some(s.image_open(&string(path)))).unwrap_or(Ok(0));
+    image_result(p, r)
+}
+extern "C" fn image_from_bytes(p: *mut c_void, data: *const u8, len: usize) -> u32 {
+    if data.is_null() {
+        return 0;
+    }
+    let bytes = unsafe { std::slice::from_raw_parts(data, len) };
+    let r = with_scene(p, |s| Some(s.image_from_bytes("", bytes))).unwrap_or(Ok(0));
+    image_result(p, r)
+}
+fn image_result(p: *mut c_void, r: Result<u32, String>) -> u32 {
+    r.unwrap_or_else(|e| {
+        log_err(p, Err(anyhow::anyhow!(e)));
+        0
+    })
+}
+extern "C" fn image_size(p: *mut c_void, id: u32, w: *mut u32, h: *mut u32) -> bool {
+    let Ok(scene) = ctx(p).scene.try_borrow() else {
+        return false;
+    };
+    let Some(img) = scene.image(id) else {
+        return false;
+    };
+    unsafe {
+        if !w.is_null() {
+            *w = img.width();
+        }
+        if !h.is_null() {
+            *h = img.height();
+        }
+    }
+    true
+}
+extern "C" fn layout_set_background(p: *mut c_void, l: u32, r: f64, g: f64, b: f64, a: f64) {
+    with_scene(p, |s| {
+        s.layout_set_background(l, (a > 0.0).then_some(Rgba(r, g, b, a)))
+    })
 }
 
 fn host_table(ctx: *mut c_void) -> UwHost {
@@ -636,5 +720,13 @@ fn host_table(ctx: *mut c_void) -> UwHost {
         media_close,
         media_info,
         shape_set_video,
+        shape_set_name,
+        shape_set_matrix,
+        shape_set_text_flags,
+        shape_set_image,
+        image_open,
+        image_from_bytes,
+        image_size,
+        layout_set_background,
     }
 }

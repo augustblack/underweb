@@ -2,11 +2,12 @@
 //! process per open package.
 //!
 //! ```text
-//! underweb [--no-sandbox] [--allow-declared] [ADDRESS...]
+//! underweb [--no-sandbox] [--allow-declared] [--edit] [ADDRESS...]
 //! ```
 //!
 //! `--allow-declared` grants every permission a package declares without
-//! asking (development and kiosks).
+//! asking (development and kiosks). `--edit` opens the first page in the
+//! layout editor.
 //!
 //! An address is `uw://<domain>/<name>[@version]` or a package directory
 //! (or `file://` URL), optionally with `?key=value&...` parameters for the
@@ -17,6 +18,7 @@
 //! visible tab has drawn (after `UNDERWEB_SNAPSHOT_DELAY` seconds, default 2)
 //! and quits.
 
+mod editor;
 mod tab;
 
 use std::path::PathBuf;
@@ -132,10 +134,19 @@ impl App {
             let edit = ui.add(
                 egui::TextEdit::singleline(&mut self.address)
                     .hint_text("uw://example.org/package, or a package directory")
-                    .desired_width(ui.available_width() - 160.0),
+                    .desired_width(ui.available_width() - 210.0),
             );
             if edit.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
                 self.tabs[self.active].navigate(self.address.trim().to_string());
+            }
+            let tab = &mut self.tabs[self.active];
+            let mut editing = tab.editing();
+            if ui
+                .toggle_value(&mut editing, "Edit")
+                .on_hover_text("Open the layout editor on this page")
+                .changed()
+            {
+                tab.set_editing(editing);
             }
             ui.toggle_value(&mut self.show_permissions, "Permissions");
             ui.toggle_value(&mut self.show_log, "Log");
@@ -191,6 +202,7 @@ impl eframe::App for App {
             self.address_bar(ui);
         });
         self.tabs[self.active].prompt_bar(ctx);
+        self.tabs[self.active].editor_panel(ctx);
         if self.show_permissions {
             egui::TopBottomPanel::bottom("permissions").show(ctx, |ui| {
                 self.tabs[self.active].permissions_ui(ui);
@@ -239,13 +251,15 @@ fn write_png(path: &std::path::Path, image: &egui::ColorImage) -> anyhow::Result
 fn main() -> eframe::Result<()> {
     let mut sandbox = std::env::var_os("UNDERWEB_NO_SANDBOX").is_none();
     let mut allow_declared = false;
+    let mut edit = false;
     let mut addresses = Vec::new();
     for a in std::env::args().skip(1) {
         match a.as_str() {
             "--no-sandbox" => sandbox = false,
             "--allow-declared" => allow_declared = true,
+            "--edit" => edit = true,
             "-h" | "--help" => {
-                println!("usage: underweb [--no-sandbox] [--allow-declared] [ADDRESS...]");
+                println!("usage: underweb [--no-sandbox] [--allow-declared] [--edit] [ADDRESS...]");
                 return Ok(());
             }
             _ => addresses.push(a),
@@ -263,6 +277,7 @@ fn main() -> eframe::Result<()> {
         Box::new(move |_cc| {
             let mut app = App::new(addresses, sandbox);
             app.allow_declared = allow_declared;
+            app.tabs[0].edit_on_start = edit;
             Ok(Box::new(app))
         }),
     )

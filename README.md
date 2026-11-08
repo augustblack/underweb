@@ -8,7 +8,7 @@ sandboxed process.
 This is a Rust rewrite of the 2011 Vala project. See
 [docs/ROADMAP.md](docs/ROADMAP.md) for the design and phases.
 
-## Status: phases 0–4, 6 and 7
+## Status: phases 0–4 and 6–8
 
 Working on macOS:
 
@@ -41,6 +41,14 @@ Working on macOS:
   shows and forgets decisions.
 - private storage per package (`storage` in JS/TS, `data_dir()` for native)
 
+- the layout editor (**Edit** in the address bar, or `--edit`): select
+  shapes, drag them and their points, change colours, text, fonts,
+  pictures and the background, add and restack shapes, while the page
+  keeps running in its sandbox. **Export** writes the scene as a new
+  package in JavaScript, TypeScript, Rust or C (`uw export` does the same
+  from the command line), replacing the old `build_files` templates.
+- the 2011 demos, ported: see [examples/README.md](examples/README.md)
+
 - trust: publishers sign releases, anyone can vouch for or warn about an
   exact archive, and the browser shows "published by … · vouched for by …
   (you follow)". When enough people you follow vouch and none warn, the
@@ -48,9 +56,7 @@ Working on macOS:
   turns off the sandbox. Identities can be Bluesky accounts, domains, or
   bare keys; vouches live on Bluesky or in signed lists.
 
-Not yet: CEF web pages (5); audio and Pd (6); video (7); the layout editor
-(8); Windows (9). Until phase 4, a package is only as trustworthy as the HTTPS
-site serving its index.
+Not yet: CEF web pages (5, skipped for now) and Windows (9).
 
 ## Build and run
 
@@ -65,6 +71,7 @@ sudo apt install libcairo2-dev libpango1.0-dev pkg-config cmake clang \
 
 cargo xtask examples          # builds the runner and the native example packages
 cargo run -p underweb-app -- hello-js hello-ts hello-rust hello-c
+cargo run -p underweb-app -- --edit demo-03-shapes   # open in the layout editor
 ```
 
 Addresses are `uw://` packages or package directories, optionally with
@@ -144,6 +151,19 @@ export function update(dt: number) {}   // every frame while window.animating
 export function pointer(ev) {}          // ev.shape is the shape under the pointer
 ```
 
+Shapes can be moved, turned and scaled, show pictures, and flow text
+inside their outline:
+
+```ts
+import { Image, Matrix } from "underweb";
+s.translate(200, 100).rotate(Math.PI / 18);  // or s.matrix = new Matrix(...)
+s.image = Image.open("photo.jpg");           // PNG, JPEG, GIF from the package
+s.markup = true;                             // Pango markup: <b>, <span foreground="red">
+s.flow = true;                               // word by word inside the outline
+s.name = "photo";                            // shown in the layout editor
+layout.setBackground(1, 0.9, 1);
+```
+
 Network access needs a declaration, and the user's OK:
 
 ```toml
@@ -210,6 +230,7 @@ See `examples/` for the same idea in Rust (the `underweb` crate and
 | `crates/underweb` | SDK for Rust packages |
 | `crates/underweb-pkg` | `underweb.toml`, archives, release indexes, addresses, publishing |
 | `crates/underweb-cli` | `uw`, the authoring tool |
+| `crates/underweb-export` | the layout editor's export: a scene as a JS, TS, Rust or C package |
 | `crates/underweb-capi` | the engine as a C library |
 | `crates/underweb-media` | the media process: one sandboxed GStreamer pipeline per video stream |
 | `crates/underweb-audio` | the audio ring, oscillators, the engine with Pure Data, and the browser's mixer |

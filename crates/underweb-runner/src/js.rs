@@ -21,7 +21,7 @@ use deno_core::{
 };
 use deno_error::JsErrorBox;
 use underweb_abi::UwPointerEvent;
-use underweb_guest::{PathOp, Rgba, Scene, Shape};
+use underweb_guest::{Matrix, PathOp, Rgba, Scene, Shape};
 use underweb_ipc::{Channel, GuestMsg, NetEvent, NetEventKind, NetOp};
 use underweb_pkg::Package;
 
@@ -133,11 +133,11 @@ fn op_uw_shape_close_path(state: &mut OpState, id: u32) {
 }
 #[op2(fast)]
 fn op_uw_shape_set_fill_color(state: &mut OpState, id: u32, r: f64, g: f64, b: f64, a: f64) {
-    with_shape(state, id, |s| s.fill = Some(Rgba(r, g, b, a)))
+    with_shape(state, id, |s| s.fill = underweb_guest::paint(r, g, b, a))
 }
 #[op2(fast)]
 fn op_uw_shape_set_stroke_color(state: &mut OpState, id: u32, r: f64, g: f64, b: f64, a: f64) {
-    with_shape(state, id, |s| s.stroke = Some(Rgba(r, g, b, a)))
+    with_shape(state, id, |s| s.stroke = underweb_guest::paint(r, g, b, a))
 }
 #[op2(fast)]
 fn op_uw_shape_set_stroke_width(state: &mut OpState, id: u32, w: f64) {
@@ -455,7 +455,9 @@ type SharedMedia = Rc<MediaCtl>;
 
 #[op2(fast)]
 fn op_uw_media_open(state: &mut OpState, #[string] source: &str, looping: bool) -> u32 {
-    state.borrow::<SharedMedia>().open(source, looping, None)
+    let id = state.borrow::<SharedMedia>().open(source, looping, None);
+    scene(state).video_source(id, source);
+    id
 }
 #[op2(fast)]
 fn op_uw_media_broadcast(
@@ -464,9 +466,11 @@ fn op_uw_media_broadcast(
     #[string] url: String,
     #[string] password: String,
 ) -> u32 {
-    state
+    let id = state
         .borrow::<SharedMedia>()
-        .open(source, false, Some(Broadcast { url, password }))
+        .open(source, false, Some(Broadcast { url, password }));
+    scene(state).video_source(id, source);
+    id
 }
 #[op2(fast)]
 fn op_uw_media_cmd(state: &mut OpState, id: u32, #[string] cmd: &str, arg: f64) {
@@ -494,6 +498,68 @@ fn op_uw_shape_set_video(state: &mut OpState, shape: u32, video: u32) {
     with_shape(state, shape, |s| s.video = (video != 0).then_some(video))
 }
 
+// ---- transforms, images, text modes ----
+
+#[op2(fast)]
+fn op_uw_shape_set_name(state: &mut OpState, id: u32, #[string] name: &str) {
+    with_shape(state, id, |s| s.name = name.to_string())
+}
+#[op2(fast)]
+#[allow(clippy::too_many_arguments)]
+fn op_uw_shape_set_matrix(
+    state: &mut OpState,
+    id: u32,
+    xx: f64,
+    yx: f64,
+    xy: f64,
+    yy: f64,
+    x0: f64,
+    y0: f64,
+) {
+    if [xx, yx, xy, yy, x0, y0].iter().all(|v| v.is_finite()) {
+        with_shape(state, id, |s| {
+            s.matrix = Matrix {
+                xx,
+                yx,
+                xy,
+                yy,
+                x0,
+                y0,
+            }
+        })
+    }
+}
+#[op2(fast)]
+fn op_uw_shape_set_text_mode(state: &mut OpState, id: u32, markup: bool, flow: bool) {
+    with_shape(state, id, |s| {
+        s.markup = markup;
+        s.flow = flow;
+    })
+}
+#[op2(fast)]
+fn op_uw_shape_set_image(state: &mut OpState, id: u32, image: u32) {
+    scene(state).shape_set_image(id, (image != 0).then_some(image))
+}
+#[op2(fast)]
+fn op_uw_image_open(state: &mut OpState, #[string] path: &str) -> Result<u32, JsErrorBox> {
+    scene(state).image_open(path).map_err(JsErrorBox::generic)
+}
+#[op2(fast)]
+fn op_uw_image_from_bytes(state: &mut OpState, #[buffer] data: &[u8]) -> Result<u32, JsErrorBox> {
+    scene(state)
+        .image_from_bytes("", data)
+        .map_err(JsErrorBox::generic)
+}
+#[op2]
+#[serde]
+fn op_uw_image_size(state: &mut OpState, id: u32) -> Option<(u32, u32)> {
+    scene(state).image(id).map(|i| (i.width(), i.height()))
+}
+#[op2(fast)]
+fn op_uw_layout_set_background(state: &mut OpState, id: u32, r: f64, g: f64, b: f64, a: f64) {
+    scene(state).layout_set_background(id, (a > 0.0).then_some(Rgba(r, g, b, a)))
+}
+
 deno_core::extension!(
     underweb,
     ops = [
@@ -512,6 +578,9 @@ deno_core::extension!(
         op_uw_pd_open, op_uw_pd_send, op_uw_pd_subscribe, op_uw_pd_next,
         op_uw_media_open, op_uw_media_broadcast, op_uw_media_cmd, op_uw_media_info,
         op_uw_shape_set_video,
+        op_uw_shape_set_name, op_uw_shape_set_matrix, op_uw_shape_set_text_mode,
+        op_uw_shape_set_image, op_uw_image_open, op_uw_image_from_bytes, op_uw_image_size,
+        op_uw_layout_set_background,
     ],
     esm_entry_point = "ext:underweb/underweb.js",
     esm = [dir "js", "underweb.js"],
@@ -560,7 +629,7 @@ impl PackageLoader {
     fn load_sync(&self, specifier: &ModuleSpecifier) -> Result<ModuleSource, ModuleLoaderError> {
         if specifier.as_str() == API_SPECIFIER {
             let code = "const u = globalThis.__uw;\n\
-                        export const Layout = u.Layout, Shape = u.Shape, window = u.window, net = u.net, storage = u.storage, audio = u.audio, video = u.video;\n";
+                        export const Layout = u.Layout, Shape = u.Shape, Matrix = u.Matrix, Image = u.Image, window = u.window, net = u.net, storage = u.storage, audio = u.audio, video = u.video;\n";
             return Ok(ModuleSource::new(
                 ModuleType::JavaScript,
                 ModuleSourceCode::String(code.to_string().into()),

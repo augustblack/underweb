@@ -1,0 +1,14 @@
+[package]
+name = "underweb-export"
+description = "Turns a page's scene into a package in JavaScript, TypeScript, Rust or C (the layout editor's export)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+underweb-ipc.workspace = true
+underweb-pkg.workspace = true
+
+[dev-dependencies]
+underweb-core.workspace = true

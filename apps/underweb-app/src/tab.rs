@@ -5,6 +5,7 @@ use std::sync::Arc;
 use std::sync::mpsc::{self, Receiver};
 use std::time::Instant;
 
+use crate::editor::Editor;
 use eframe::egui;
 use underweb_core::{
     Decision, GrantState, Guest, GuestEvent, Origin, Resolved, SpawnOptions, Store, Trust,
@@ -87,6 +88,10 @@ pub struct Tab {
     prompts: Vec<(u64, String)>,
     /// Who published and vouches for the package (remote packages).
     pub verdict: Option<Verdict>,
+    /// The layout editor, while open.
+    editor: Option<Editor>,
+    /// Open the editor as soon as the page runs (`--edit`).
+    pub edit_on_start: bool,
 }
 
 impl Tab {
@@ -107,6 +112,39 @@ impl Tab {
             loading: None,
             prompts: Vec::new(),
             verdict: None,
+            editor: None,
+            edit_on_start: false,
+        }
+    }
+
+    pub fn editing(&self) -> bool {
+        self.editor.is_some()
+    }
+
+    /// Open or close the layout editor.
+    pub fn set_editing(&mut self, on: bool) {
+        let Some(g) = &self.guest else { return };
+        if on == self.editor.is_some() || g.set_edit_mode(on).is_err() {
+            return;
+        }
+        self.editor = on.then(|| Editor::new(g.package.name()));
+    }
+
+    /// The editor's side panel, if it's open.
+    pub fn editor_panel(&mut self, ctx: &egui::Context) {
+        let Some(editor) = self.editor.as_mut() else {
+            return;
+        };
+        let package = self.guest.as_ref().map(|g| g.package.dir.clone());
+        let mut open = true;
+        egui::SidePanel::right("editor")
+            .default_width(300.0)
+            .show(ctx, |ui| open = editor.panel(ui, package.as_deref()));
+        if let Some(g) = &self.guest {
+            editor.flush(g);
+        }
+        if !open {
+            self.set_editing(false);
         }
     }
 
@@ -142,6 +180,7 @@ impl Tab {
         self.loading = None;
         self.prompts.clear();
         self.verdict = None;
+        self.editor = None;
         self.status = Status::Empty;
     }
 
@@ -272,7 +311,23 @@ impl Tab {
             handled += 1;
             got_frame = matches!(ev, GuestEvent::Frame(_));
             match ev {
-                GuestEvent::Started { sandboxed } => self.status = Status::Running { sandboxed },
+                GuestEvent::Started { sandboxed } => {
+                    self.status = Status::Running { sandboxed };
+                    if std::mem::take(&mut self.edit_on_start) {
+                        if let Err(e) = guest.set_edit_mode(true) {
+                            self.log.push(format!("editor: {e:#}"));
+                        } else {
+                            let mut ed = Editor::new(guest.package.name());
+                            ed.auto_select = true;
+                            self.editor = Some(ed);
+                        }
+                    }
+                }
+                GuestEvent::Scene(doc) => {
+                    if let Some(e) = self.editor.as_mut() {
+                        e.receive(doc);
+                    }
+                }
                 GuestEvent::Title(t) => self.title = t,
                 GuestEvent::Animating(on) => self.animating = on,
                 GuestEvent::Log(l) => self.log.push(l),
@@ -490,8 +545,17 @@ impl Tab {
             ui.painter().image(tex.id(), rect, uv, egui::Color32::WHITE);
         }
 
+        // while editing, the editor has the pointer
+        if let Some(editor) = self.editor.as_mut() {
+            editor.canvas(ui, rect);
+            editor.flush(guest);
+        }
         // input, in page coordinates
-        let events = ui.input(|i| i.events.clone());
+        let events = if self.editor.is_some() {
+            Vec::new()
+        } else {
+            ui.input(|i| i.events.clone())
+        };
         for e in events {
             match e {
                 egui::Event::PointerMoved(p) if rect.contains(p) => {

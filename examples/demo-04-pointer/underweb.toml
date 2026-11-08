@@ -1,0 +1,6 @@
+[package]
+name = "demo-04-pointer"
+version = "0.1.0"
+kind = "js"
+entry = "main.js"
+description = "demos/04shape, ported: pointer events on a rotated shape, in window and shape coordinates."

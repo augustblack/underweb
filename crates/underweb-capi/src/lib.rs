@@ -240,6 +240,8 @@ pub unsafe extern "C" fn uw_engine_next_event(
             e.frame = f.rgba;
             out.rgba = e.frame.as_ptr();
         }
+        // only sent in edit mode, which this API doesn't open
+        GuestEvent::Scene(_) => return false,
     }
     true
 }
