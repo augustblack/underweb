@@ -144,7 +144,7 @@ Trust doesn't depend on any one network. The UI never shows protocol words like 
 ## Known risks and constraints
 - **V8 needs JIT.** The macOS sandbox profile and hardened runtime must allow `MAP_JIT` (the `allow-jit` entitlement). Otherwise, run V8 with `--jitless` in the strictest mode.
 - **Fonts inside the sandbox.** Pango needs font access: the CoreText mach services on Mac, and the font and fontconfig directories read-only on Linux. The sandbox profile is built allowlist-first, and denials are logged.
-- **Building on the Mac and running everywhere.** The Mac builds locally. Linux and Windows release binaries come from CI, because CEF, V8, GStreamer and pango aren't practical to cross-compile from a Mac. On Windows, cairo, pango and GStreamer all come from GStreamer's MSVC installers (one glib per process).
+- **Building on the Mac and running everywhere.** The Mac builds locally. Linux and Windows release binaries come from CI, because CEF, V8, GStreamer and pango aren't practical to cross-compile from a Mac. On Windows, cairo, pango and GStreamer all come from GStreamer's MSVC installer (one glib per process).
 - **Windows sandbox.** Done in phase 9 (AppContainer + job object), but not yet run on Windows.
 - **Licensing is still open.**
   - The original project is GPL-3.0.

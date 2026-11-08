@@ -36,7 +36,7 @@ fn main() -> Result<()> {
         "test" => {
             examples()?;
             let ok = Command::new(env!("CARGO"))
-                .args(["test", "--workspace"])
+                .args(["test", "--workspace", "--no-fail-fast"])
                 .current_dir(root())
                 .status()?;
             if !ok.success() {

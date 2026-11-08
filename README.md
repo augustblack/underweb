@@ -77,8 +77,8 @@ sudo apt install libcairo2-dev libpango1.0-dev pkg-config cmake clang \
 ```
 
 On Windows: Visual Studio Build Tools (run from a developer prompt so
-`cl.exe` is on `PATH`), GStreamer's MSVC runtime and development
-installers (they include cairo and pango), and `pkg-config`
+`cl.exe` is on `PATH`), GStreamer's MSVC installer (1.26 or later; it
+includes cairo and pango), and `pkg-config`
 (`choco install pkgconfiglite`), with GStreamer's `bin` on `PATH` and its
 `lib\pkgconfig` in `PKG_CONFIG_PATH`; see
 [.github/actions/native-deps](.github/actions/native-deps/action.yml).

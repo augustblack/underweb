@@ -1,3 +1,7 @@
 /target
 /examples/*/dist
-*.png
+# screenshots (UNDERWEB_SNAPSHOT) in the repo root
+/*.png
+
+# local read-only GitHub token (CI logs)
+.gh_read_only

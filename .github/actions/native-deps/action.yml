@@ -25,23 +25,37 @@ runs:
       if: runner.os == 'Windows'
       uses: ilammy/msvc-dev-cmd@v1
 
-    # GStreamer's MSVC packages carry their own glib, cairo and pango;
-    # using those for everything keeps a single glib in each process
+    # GStreamer's MSVC installer carries its own glib, cairo and pango;
+    # using those for everything keeps a single glib in each process.
+    # Since 1.26 it is one Inno Setup .exe (runtime + development files).
     - name: Windows GStreamer (with cairo and pango)
       if: runner.os == 'Windows'
       shell: pwsh
       run: |
-        $v = "1.24.12"
-        $base = "https://gstreamer.freedesktop.org/data/pkg/windows/$v/msvc"
-        foreach ($f in "gstreamer-1.0-msvc-x86_64-$v.msi", "gstreamer-1.0-devel-msvc-x86_64-$v.msi") {
-          Invoke-WebRequest "$base/$f" -OutFile "$env:RUNNER_TEMP\$f"
-          $p = Start-Process msiexec -Wait -PassThru -ArgumentList "/i `"$env:RUNNER_TEMP\$f`" /qn ADDLOCAL=ALL"
-          if ($p.ExitCode -ne 0) { throw "installing $f failed ($($p.ExitCode))" }
+        $v = "1.28.8"
+        $f = "gstreamer-1.0-msvc-x86_64-$v.exe"
+        $dir = "C:\gstreamer"
+        Invoke-WebRequest "https://gstreamer.freedesktop.org/data/pkg/windows/$v/msvc/$f" -OutFile "$env:RUNNER_TEMP\$f"
+        $p = Start-Process "$env:RUNNER_TEMP\$f" -Wait -PassThru -ArgumentList `
+          "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART", "/SP-", "/TYPE=full", "/DIR=$dir", "/LOG=$env:RUNNER_TEMP\gst-install.log"
+        if ($p.ExitCode -ne 0) {
+          Get-Content "$env:RUNNER_TEMP\gst-install.log" -Tail 40
+          throw "installing $f failed ($($p.ExitCode))"
         }
-        $root = @("C:\Program Files\gstreamer\1.0\msvc_x86_64", "C:\gstreamer\1.0\msvc_x86_64") |
-          Where-Object { Test-Path "$_\bin\gstreamer-1.0-0.dll" } | Select-Object -First 1
-        if (-not $root) { throw "GStreamer did not install where expected" }
-        if (-not (Test-Path "$root\bin\cairo-2.dll")) { throw "this GStreamer has no cairo" }
+        # wherever the layout puts it: the bin with gstreamer-1.0-0.dll
+        $dll = Get-ChildItem $dir -Recurse -Filter gstreamer-1.0-0.dll | Select-Object -First 1
+        if (-not $dll) {
+          Get-ChildItem $dir -Recurse -Depth 3 | Select-Object -First 60 FullName
+          throw "no gstreamer-1.0-0.dll under $dir"
+        }
+        $root = $dll.Directory.Parent.FullName
+        Write-Output "GStreamer in $root"
+        foreach ($need in "bin\cairo-2.dll", "lib\pkgconfig\gstreamer-1.0.pc", "lib\pkgconfig\pangocairo.pc") {
+          if (-not (Test-Path "$root\$need")) {
+            Get-ChildItem "$root\lib\pkgconfig" -ErrorAction SilentlyContinue | Select-Object -First 80 Name
+            throw "this GStreamer install has no $need"
+          }
+        }
         "$root\bin" | Out-File -Append -Encoding utf8 $env:GITHUB_PATH
         "PKG_CONFIG_PATH=$root\lib\pkgconfig" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
         "GSTREAMER_1_0_ROOT_MSVC_X86_64=$root\" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
