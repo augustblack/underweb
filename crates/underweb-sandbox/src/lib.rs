@@ -127,8 +127,27 @@ pub fn system_read_paths(exec: bool) -> Vec<PathBuf> {
                 .filter(|p| p.exists())
                 .map(Path::to_path_buf),
         );
+        #[cfg(target_os = "macos")]
+        paths.extend(selected_xcode());
     }
     paths
+}
+
+/// The Xcode that `xcode-select` (or `DEVELOPER_DIR`) chose, which need
+/// not be /Applications/Xcode.app (CI machines have `Xcode_26.6.app`).
+#[cfg(target_os = "macos")]
+fn selected_xcode() -> Option<PathBuf> {
+    let dev = std::env::var_os("DEVELOPER_DIR")
+        .map(PathBuf::from)
+        .or_else(|| std::fs::read_link("/private/var/db/xcode_select_link").ok())?
+        .canonicalize()
+        .ok()?;
+    // the whole .app: xcrun loads libraries from beside the Developer dir
+    let app = dev
+        .ancestors()
+        .find(|a| a.extension().is_some_and(|e| e == "app"))
+        .map(Path::to_path_buf);
+    Some(app.unwrap_or(dev))
 }
 
 #[cfg(windows)]

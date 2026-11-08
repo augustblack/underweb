@@ -119,26 +119,31 @@ impl Editor {
                 let pts: Vec<Pos2> = poly.into_iter().map(to_screen).collect();
                 painter.add(egui::Shape::closed_line(
                     pts,
-                    Stroke::new(1.0, Color32::from_black_alpha(60)),
+                    Stroke::new(1.0_f32, Color32::from_black_alpha(60)),
                 ));
             }
         }
         if let Some(s) = self.selected.and_then(|id| self.doc.shape(id)) {
             for poly in s.polygons() {
                 let pts: Vec<Pos2> = poly.into_iter().map(to_screen).collect();
-                painter.add(egui::Shape::closed_line(pts, Stroke::new(2.0, ACCENT)));
+                painter.add(egui::Shape::closed_line(pts, Stroke::new(2.0_f32, ACCENT)));
             }
             for h in handles(s) {
                 let p = to_screen(s.matrix.apply(h.pos.0, h.pos.1));
                 if let Some(anchor) = h.anchor {
                     let a = to_screen(s.matrix.apply(anchor.0, anchor.1));
-                    painter.line_segment([a, p], Stroke::new(1.0, ACCENT));
+                    painter.line_segment([a, p], Stroke::new(1.0_f32, ACCENT));
                     painter.circle_filled(p, 4.0, Color32::WHITE);
-                    painter.circle_stroke(p, 4.0, Stroke::new(1.5, ACCENT));
+                    painter.circle_stroke(p, 4.0, Stroke::new(1.5_f32, ACCENT));
                 } else {
                     let r = Rect::from_center_size(p, Vec2::splat(8.0));
                     painter.rect_filled(r, 0.0, Color32::WHITE);
-                    painter.rect_stroke(r, 0.0, Stroke::new(1.5, ACCENT), egui::StrokeKind::Middle);
+                    painter.rect_stroke(
+                        r,
+                        0.0,
+                        Stroke::new(1.5_f32, ACCENT),
+                        egui::StrokeKind::Middle,
+                    );
                 }
             }
         }

@@ -16,17 +16,19 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@stable
+      # the version development uses; newer compilers bring new lints
+      - uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: 1.91.0
           components: clippy
       - uses: Swatinem/rust-cache@v2
       - uses: ./.github/actions/native-deps
 
+      # (not in Git Bash on Windows: its /usr/bin/link shadows MSVC's link.exe)
+      - name: Generate the header
+        run: cargo xtask header
       - name: Header is up to date
-        shell: bash
-        run: |
-          cargo xtask header
-          git diff --exit-code include/underweb.h
+        run: git diff --exit-code include/underweb.h
 
       - name: Build and test (includes the sandbox tests)
         run: cargo xtask test

@@ -240,7 +240,7 @@ impl Engine {
         }
         if let Ok(mut scope) = self.scope.try_lock() {
             scope.drain(..BLOCK);
-            scope.extend(out.chunks_exact(2).map(|p| 0.5 * (p[0] + p[1])));
+            scope.extend(out.as_chunks::<2>().0.iter().map(|[l, r]| 0.5 * (l + r)));
         }
     }
 }
@@ -264,8 +264,8 @@ mod tests {
         let mut b = [0f32; BLOCK * CHANNELS];
         for _ in 0..750 {
             e.render(&mut v, &mut b);
-            left.extend(b.chunks_exact(2).map(|p| p[0]));
-            right.extend(b.chunks_exact(2).map(|p| p[1]));
+            left.extend(b.as_chunks::<2>().0.iter().map(|[l, _]| *l));
+            right.extend(b.as_chunks::<2>().0.iter().map(|[_, r]| *r));
         }
         let f = estimate_freq(&left, 48000.0);
         assert!((f - 330.0).abs() < 2.0, "{f}");

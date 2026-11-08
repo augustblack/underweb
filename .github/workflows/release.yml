@@ -36,7 +36,10 @@ jobs:
       WINDOWS_CERT_PFX: ${{ secrets.WINDOWS_CERT_PFX }}
     steps:
       - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@stable
+      # the version development uses; newer compilers bring new lints
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.91.0
       - uses: ./.github/actions/native-deps
 
       - name: macOS signing identity
@@ -99,7 +102,10 @@ jobs:
           v=$(sed -n '/^\[workspace.package\]/,/^\[/s/^version = "\(.*\)"/\1/p' Cargo.toml)
           echo "VERSION=$v" >> "$GITHUB_ENV"
 
-      - uses: dtolnay/rust-toolchain@stable
+      # the version development uses; newer compilers bring new lints
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.91.0
         if: env.UNDERWEB_RELEASE_KEY != ''
       - uses: ./.github/actions/native-deps
         if: env.UNDERWEB_RELEASE_KEY != ''
