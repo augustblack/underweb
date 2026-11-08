@@ -71,6 +71,14 @@ fn run(name: &str, sandbox: bool, params: &[(&str, &str)], done: impl Fn(&Run) -
             None => {}
         }
     }
+    if r.sandboxed.is_none() {
+        // say why, for platforms we can only test in CI
+        eprintln!(
+            "{name}: the runner never started; errors {:?}, exit status {:?}",
+            r.errors,
+            guest.exit_status()
+        );
+    }
     guest.shutdown();
     r
 }

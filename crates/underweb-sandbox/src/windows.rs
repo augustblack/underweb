@@ -49,6 +49,9 @@ use windows_sys::Win32::Storage::FileSystem::{
     FILE_ALL_ACCESS, FILE_GENERIC_EXECUTE, FILE_GENERIC_READ,
 };
 use windows_sys::Win32::System::Console::{GetStdHandle, STD_ERROR_HANDLE};
+use windows_sys::Win32::System::Diagnostics::Debug::{
+    SEM_FAILCRITICALERRORS, SEM_NOGPFAULTERRORBOX, SEM_NOOPENFILEERRORBOX, SetErrorMode,
+};
 use windows_sys::Win32::System::JobObjects::{
     AssignProcessToJobObject, CreateJobObjectW, JOB_OBJECT_LIMIT_ACTIVE_PROCESS,
     JOB_OBJECT_LIMIT_DIE_ON_UNHANDLED_EXCEPTION, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
@@ -552,6 +555,12 @@ fn inheritable_copy(h: HANDLE) -> Result<OwnedHandle> {
 }
 
 pub fn spawn(l: &Launch) -> Result<Process> {
+    // children inherit the error mode: a DLL the loader can't find or
+    // open must end the child with a status, not wait on an error
+    // dialog nobody will see
+    unsafe {
+        SetErrorMode(SEM_FAILCRITICALERRORS | SEM_NOGPFAULTERRORBOX | SEM_NOOPENFILEERRORBOX);
+    }
     // container, and its access to the files it needs
     let container = match &l.container {
         Some(c) => {
@@ -911,6 +920,53 @@ mod tests {
         assert_eq!(q(r"C:\dir with space\"), r#""C:\dir with space\\""#);
         assert_eq!(q(r#"say "hi""#), r#""say \"hi\"""#);
         assert_eq!(q(""), "\"\"");
+    }
+
+    /// A container (cmd.exe, nothing of ours) can read a granted folder
+    /// and not an ungranted one, and can't start programs.
+    #[test]
+    fn container_reads_only_granted_files() {
+        use crate::{Container, Launch, Policy};
+        let base = std::env::temp_dir().join(format!("uw-container-{}", std::process::id()));
+        let (inside, outside) = (base.join("inside"), base.join("outside"));
+        std::fs::create_dir_all(&inside).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(inside.join("a.txt"), "INSIDE-OK").unwrap();
+        std::fs::write(outside.join("b.txt"), "OUTSIDE-LEAK").unwrap();
+        let cmd = PathBuf::from(std::env::var_os("SystemRoot").unwrap())
+            .join("System32")
+            .join("cmd.exe");
+        let run = |script: String| -> (String, Option<i32>) {
+            let mut l = Launch::new(&cmd);
+            l.arg("/C").arg(script);
+            l.pipe_stderr = true;
+            l.container = Some(Container {
+                name: "underweb-sandbox-test".into(),
+                policy: Policy {
+                    read_only: vec![inside.clone()],
+                    read_write: vec![],
+                    allow_exec: false,
+                },
+                capabilities: vec![],
+            });
+            let mut p = l.spawn().expect("starting cmd.exe in a container");
+            let mut out = String::new();
+            p.take_stderr().unwrap().read_to_string(&mut out).unwrap();
+            (out, p.wait().unwrap().code())
+        };
+        let (out, code) = run(format!("type \"{}\" 1>&2", inside.join("a.txt").display()));
+        eprintln!("granted read: {code:?} {out}");
+        assert!(
+            out.contains("INSIDE-OK"),
+            "granted file unreadable: {code:?} {out}"
+        );
+        let (out, code) = run(format!("type \"{}\" 1>&2", outside.join("b.txt").display()));
+        eprintln!("ungranted read: {code:?} {out}");
+        assert!(!out.contains("OUTSIDE-LEAK"), "read outside the grant");
+        let (out, code) = run("whoami 1>&2".into());
+        eprintln!("exec: {code:?} {out}");
+        assert_ne!(code, Some(0), "started a program: {out}");
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     #[test]
