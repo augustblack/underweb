@@ -101,7 +101,10 @@ fn run(args: impl Iterator<Item = String>) -> Result<PathBuf> {
 
 fn run_cmd(cmd: &mut Command) -> Result<()> {
     eprintln!("$ {cmd:?}");
+    // compilers report errors on stdout (cl.exe) or stderr; the browser
+    // reads only stderr
     let status = cmd
+        .stdout(std::process::Stdio::from(std::io::stderr()))
         .status()
         .with_context(|| format!("starting {:?}", cmd.get_program()))?;
     if !status.success() {

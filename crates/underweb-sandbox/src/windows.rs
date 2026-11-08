@@ -171,6 +171,9 @@ impl Drop for Sid {
     }
 }
 
+/// Held while granting a container access to files and the desktop.
+static GRANTS: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 /// Profiles are created one at a time: concurrent creation fails now and
 /// then with E_UNEXPECTED (several packages starting at once).
 static PROFILES: std::sync::Mutex<()> = std::sync::Mutex::new(());
@@ -682,6 +685,10 @@ pub fn spawn(l: &Launch) -> Result<Process> {
     // container, and its access to the files it needs
     let container = match &l.container {
         Some(c) => {
+            // one at a time: a grant reads a DACL and writes it back, and
+            // two containers granted the same folder at once (shared DLL
+            // and toolchain folders) would lose one entry
+            let _grants = GRANTS.lock().unwrap_or_else(|e| e.into_inner());
             let sid = container_sid(&c.name)?;
             grant_program(&l.program, &sid)?;
             if let Err(e) = grant_desktop(&sid) {
@@ -1081,13 +1088,13 @@ mod tests {
             p.take_stderr().unwrap().read_to_string(&mut out).unwrap();
             (out, p.wait().unwrap().code())
         };
-        let (out, code) = run(format!("type \"{}\" 1>&2", inside.join("a.txt").display()));
+        let (out, code) = run(format!("type {} 1>&2", inside.join("a.txt").display()));
         eprintln!("granted read: {code:?} {out}");
         assert!(
             out.contains("INSIDE-OK"),
             "granted file unreadable: {code:?} {out}"
         );
-        let (out, code) = run(format!("type \"{}\" 1>&2", outside.join("b.txt").display()));
+        let (out, code) = run(format!("type {} 1>&2", outside.join("b.txt").display()));
         eprintln!("ungranted read: {code:?} {out}");
         assert!(!out.contains("OUTSIDE-LEAK"), "read outside the grant");
         let (out, code) = run("whoami 1>&2".into());
