@@ -27,14 +27,17 @@ use std::process::ExitStatus;
 
 use anyhow::{Result, bail};
 use windows_sys::Win32::Foundation::{
-    DUPLICATE_SAME_ACCESS, DuplicateHandle, ERROR_ALREADY_EXISTS, ERROR_SUCCESS, HANDLE, LocalFree,
-    WAIT_OBJECT_0, WAIT_TIMEOUT,
+    DUPLICATE_SAME_ACCESS, DuplicateHandle, ERROR_ALREADY_EXISTS, ERROR_SUCCESS, GENERIC_EXECUTE,
+    GENERIC_READ, GENERIC_WRITE, HANDLE, LocalFree, WAIT_OBJECT_0, WAIT_TIMEOUT,
 };
 use windows_sys::Win32::Security::Authorization::{
     ConvertStringSecurityDescriptorToSecurityDescriptorW, ConvertStringSidToSidW,
     EXPLICIT_ACCESS_W, GRANT_ACCESS, GetNamedSecurityInfoW, NO_MULTIPLE_TRUSTEE, SDDL_REVISION_1,
     SE_FILE_OBJECT, SetEntriesInAclW, SetNamedSecurityInfoW, TRUSTEE_IS_SID,
     TRUSTEE_IS_WELL_KNOWN_GROUP, TRUSTEE_W,
+};
+use windows_sys::Win32::Security::Authorization::{
+    GetSecurityInfo, SE_WINDOW_OBJECT, SetSecurityInfo,
 };
 use windows_sys::Win32::Security::Isolation::{
     CreateAppContainerProfile, DeriveAppContainerSidFromAppContainerName,
@@ -46,7 +49,7 @@ use windows_sys::Win32::Security::{
     SID_AND_ATTRIBUTES, SUB_CONTAINERS_AND_OBJECTS_INHERIT, TOKEN_QUERY, TokenIsAppContainer,
 };
 use windows_sys::Win32::Storage::FileSystem::{
-    FILE_ALL_ACCESS, FILE_GENERIC_EXECUTE, FILE_GENERIC_READ,
+    FILE_ALL_ACCESS, FILE_GENERIC_EXECUTE, FILE_GENERIC_READ, READ_CONTROL, WRITE_DAC,
 };
 use windows_sys::Win32::System::Console::{GetStdHandle, STD_ERROR_HANDLE};
 use windows_sys::Win32::System::Diagnostics::Debug::{
@@ -62,7 +65,12 @@ use windows_sys::Win32::System::JobObjects::{
     JobObjectBasicUIRestrictions, JobObjectExtendedLimitInformation, SetInformationJobObject,
 };
 use windows_sys::Win32::System::Pipes::CreatePipe;
+use windows_sys::Win32::System::StationsAndDesktops::{
+    CloseDesktop, CloseWindowStation, GetProcessWindowStation, GetThreadDesktop,
+    GetUserObjectInformationW, OpenDesktopW, OpenWindowStationW, UOI_NAME,
+};
 use windows_sys::Win32::System::SystemServices::ACCESS_ALLOWED_ACE_TYPE;
+use windows_sys::Win32::System::Threading::GetCurrentThreadId;
 use windows_sys::Win32::System::Threading::{
     CREATE_NO_WINDOW, CREATE_SUSPENDED, CREATE_UNICODE_ENVIRONMENT, CreateProcessW,
     DeleteProcThreadAttributeList, EXTENDED_STARTUPINFO_PRESENT, GetCurrentProcess,
@@ -443,6 +451,12 @@ impl Drop for LocalMem {
 /// it), without granting all of `target\debug` in a development build.
 fn grant_program(program: &Path, sid: &Sid) -> Result<()> {
     grant(program, sid, READ, false)?;
+    // Windows' own programs (and their DLLs) are readable by every
+    // container already, and a user may not change their permissions
+    let system = std::env::var_os("SystemRoot").map(PathBuf::from);
+    if system.is_some_and(|root| program.starts_with(root)) {
+        return Ok(());
+    }
     if let Some(dir) = program.parent() {
         grant(dir, sid, READ, false)?;
         for e in std::fs::read_dir(dir)?.flatten() {
@@ -451,6 +465,110 @@ fn grant_program(program: &Path, sid: &Sid) -> Result<()> {
                 grant(&p, sid, READ, false)?;
             }
         }
+    }
+    Ok(())
+}
+
+/// Let the container use this session's window station and desktop.
+/// user32.dll (which cairo and pango load) attaches to them as a process
+/// starts, and fails with STATUS_DLL_INIT_FAILED if it may not. An
+/// interactive desktop admits all containers already; a service session's
+/// (CI) does not. Chromium grants its sandboxed processes the same.
+fn grant_desktop(sid: &Sid) -> Result<()> {
+    let name_of = |h: HANDLE| -> Result<Vec<u16>> {
+        let mut buf = vec![0u16; 256];
+        let mut needed = 0u32;
+        let ok = unsafe {
+            GetUserObjectInformationW(
+                h,
+                UOI_NAME,
+                buf.as_mut_ptr().cast(),
+                (buf.len() * 2) as u32,
+                &mut needed,
+            )
+        };
+        if ok == 0 {
+            return Err(last_error("GetUserObjectInformationW"));
+        }
+        let n = buf.iter().position(|&c| c == 0).unwrap_or(buf.len());
+        buf.truncate(n);
+        buf.push(0);
+        Ok(buf)
+    };
+    let station = name_of(unsafe { GetProcessWindowStation() })?;
+    let desktop = name_of(unsafe { GetThreadDesktop(GetCurrentThreadId()) })?;
+
+    let ws = unsafe { OpenWindowStationW(station.as_ptr(), 0, READ_CONTROL | WRITE_DAC) };
+    if ws.is_null() {
+        return Err(last_error("opening the window station"));
+    }
+    let r = grant_object(ws, sid, GENERIC_READ | GENERIC_EXECUTE);
+    unsafe { CloseWindowStation(ws) };
+    r?;
+    // a desktop name is looked up in this process's window station
+    let desk = unsafe { OpenDesktopW(desktop.as_ptr(), 0, 0, READ_CONTROL | WRITE_DAC) };
+    if desk.is_null() {
+        return Err(last_error("opening the desktop"));
+    }
+    let r = grant_object(desk, sid, GENERIC_READ | GENERIC_WRITE | GENERIC_EXECUTE);
+    unsafe { CloseDesktop(desk) };
+    r
+}
+
+/// `grant` for a window station or desktop handle.
+fn grant_object(h: HANDLE, sid: &Sid, access: u32) -> Result<()> {
+    let mut dacl: *mut ACL = std::ptr::null_mut();
+    let mut sd: PSECURITY_DESCRIPTOR = std::ptr::null_mut();
+    let err = unsafe {
+        GetSecurityInfo(
+            h,
+            SE_WINDOW_OBJECT,
+            DACL_SECURITY_INFORMATION,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            &mut dacl,
+            std::ptr::null_mut(),
+            &mut sd,
+        )
+    };
+    if err != ERROR_SUCCESS {
+        bail!(
+            "reading the desktop's permissions: {}",
+            io::Error::from_raw_os_error(err as i32)
+        );
+    }
+    let _sd = LocalMem(sd);
+    let ea = EXPLICIT_ACCESS_W {
+        grfAccessPermissions: access,
+        grfAccessMode: GRANT_ACCESS,
+        grfInheritance: NO_INHERITANCE,
+        Trustee: trustee(sid),
+    };
+    let mut new: *mut ACL = std::ptr::null_mut();
+    let err = unsafe { SetEntriesInAclW(1, &ea, dacl, &mut new) };
+    if err != ERROR_SUCCESS {
+        bail!(
+            "SetEntriesInAclW for the desktop: {}",
+            io::Error::from_raw_os_error(err as i32)
+        );
+    }
+    let _new = LocalMem(new.cast());
+    let err = unsafe {
+        SetSecurityInfo(
+            h,
+            SE_WINDOW_OBJECT,
+            DACL_SECURITY_INFORMATION,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            new,
+            std::ptr::null(),
+        )
+    };
+    if err != ERROR_SUCCESS {
+        bail!(
+            "letting the sandbox use the desktop: {}",
+            io::Error::from_raw_os_error(err as i32)
+        );
     }
     Ok(())
 }
@@ -566,6 +684,10 @@ pub fn spawn(l: &Launch) -> Result<Process> {
         Some(c) => {
             let sid = container_sid(&c.name)?;
             grant_program(&l.program, &sid)?;
+            if let Err(e) = grant_desktop(&sid) {
+                // only fatal if user32 needs it; say why if it does
+                eprintln!("underweb: {e:#} (a sandboxed program may fail to start)");
+            }
             let policy = c.policy.canonical()?;
             for d in crate::system_read_paths(policy.allow_exec)
                 .iter()
