@@ -8,7 +8,7 @@ sandboxed process.
 This is a Rust rewrite of the 2011 Vala project. See
 [docs/ROADMAP.md](docs/ROADMAP.md) for the design and phases.
 
-## Status: phases 0–3
+## Status: phases 0–4
 
 Working on macOS:
 
@@ -41,8 +41,15 @@ Working on macOS:
   shows and forgets decisions.
 - private storage per package (`storage` in JS/TS, `data_dir()` for native)
 
-Not yet: signatures and trust (phase 4); CEF web pages (5); audio and Pd
-(6); video (7); the layout editor (8); Windows (9). Until phase 4, a package is only as trustworthy as the HTTPS
+- trust: publishers sign releases, anyone can vouch for or warn about an
+  exact archive, and the browser shows "published by … · vouched for by …
+  (you follow)". When enough people you follow vouch and none warn, the
+  package's declared permissions are granted without asking; trust never
+  turns off the sandbox. Identities can be Bluesky accounts, domains, or
+  bare keys; vouches live on Bluesky or in signed lists.
+
+Not yet: CEF web pages (5); audio and Pd (6); video (7); the layout editor
+(8); Windows (9). Until phase 4, a package is only as trustworthy as the HTTPS
 site serving its index.
 
 ## Build and run
@@ -82,6 +89,32 @@ Uploaded to `https://example.org/`, the packages are at
 `uw://example.org/hello-ts`. Publish native packages from each platform
 (or CI) to add prebuilt libraries; machines without one build from the
 source archive.
+
+## Trust
+
+```sh
+uw key                                   # your signing key (created on first use)
+uw publish examples/hello-net --repo site/ --sign --as dns:example.org
+                                         # serve site/ at https://example.org/
+uw vouch uw://example.org/hello-net --level reviewed --note "read it" \
+    --list reviews.json --name "My reviews"          # a signed list you host…
+UNDERWEB_APP_PASSWORD=… uw link-bluesky alice.bsky.social
+UNDERWEB_APP_PASSWORD=… uw vouch uw://example.org/hello-net --bluesky alice.bsky.social
+                                         # …or a record on your Bluesky account
+uw follow alice.bsky.social              # whose vouches count
+uw follow --list https://example.org/reviews.json
+uw follow-bluesky alice.bsky.social      # everyone alice follows
+uw check uw://example.org/hello-net      # what the browser will say
+```
+
+A statement is a small JSON document signed with an Ed25519 key and checked
+on your machine. Bluesky accounts declare their key in an `app.underweb.key`
+record and publish statements as `app.underweb.statement` records; domains
+publish keys at `/.well-known/underweb/key`. The first key seen for an
+identity is pinned, and a different one later is flagged. Not yet:
+checking ATProto repository proofs (records are read over HTTPS from each
+account's server), vouching from inside the browser, and more adapters
+(Sigstore, Mastodon follows, Nostr).
 
 ## Writing a package
 
@@ -150,6 +183,8 @@ See `examples/` for the same idea in Rust (the `underweb` crate and
 | `crates/underweb-pkg` | `underweb.toml`, archives, release indexes, addresses, publishing |
 | `crates/underweb-cli` | `uw`, the authoring tool |
 | `crates/underweb-capi` | the engine as a C library |
+| `crates/underweb-trust` | signed statements, keys, the trust store and policy, signed lists |
+| `crates/underweb-trust-atproto` | Bluesky/ATProto: identities, keys, statements, follows |
 | `sdk/js` | TypeScript types for JS/TS packages |
 | `xtask` | `cargo xtask examples / header / test` |
 

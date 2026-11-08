@@ -53,6 +53,7 @@ pub fn publish(pkg: &Package, repo: &Path, opts: PublishOptions) -> Result<Vec<P
         version: version.to_string(),
         source: None,
         targets: Default::default(),
+        statement: None,
     };
 
     let mut write = |file: String, files: Vec<(PathBuf, Vec<u8>)>| -> Result<Artifact> {

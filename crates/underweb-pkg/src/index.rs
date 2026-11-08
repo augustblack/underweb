@@ -34,6 +34,21 @@ pub struct Release {
     pub source: Option<Artifact>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub targets: BTreeMap<String, Artifact>,
+    /// The publisher's signed release statement (JSON), covering the
+    /// hashes of the archives above. See `underweb-trust`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub statement: Option<String>,
+}
+
+impl Release {
+    /// Every archive hash in this release.
+    pub fn hashes(&self) -> Vec<String> {
+        self.source
+            .iter()
+            .chain(self.targets.values())
+            .map(|a| a.blake3.clone())
+            .collect()
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -81,6 +96,9 @@ impl Index {
                     r.source = release.source;
                 }
                 r.targets.extend(release.targets);
+                if release.statement.is_some() {
+                    r.statement = release.statement;
+                }
             }
             None => self.releases.push(release),
         }
@@ -128,6 +146,7 @@ mod tests {
                 size: 1,
             }),
             targets: BTreeMap::new(),
+            statement: None,
         }
     }
 

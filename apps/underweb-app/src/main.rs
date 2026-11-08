@@ -25,10 +25,11 @@ use std::time::{Duration, Instant};
 
 use eframe::egui;
 use tab::Tab;
-use underweb_core::Store;
+use underweb_core::{Store, Trust};
 
 struct App {
     store: Arc<Store>,
+    trust: Arc<Trust>,
     tabs: Vec<Tab>,
     active: usize,
     address: String,
@@ -66,8 +67,13 @@ impl App {
         };
         let mut store = Store::new(Store::default_root());
         store.sandbox = sandbox;
+        let trust = Trust::open(None).unwrap_or_else(|e| {
+            eprintln!("trust settings unreadable ({e:#}); starting empty");
+            Trust::new(Default::default(), Default::default())
+        });
         App {
             store: Arc::new(store),
+            trust: Arc::new(trust),
             address: addresses[0].clone(),
             tabs: addresses.into_iter().map(Tab::new).collect(),
             active: 0,
@@ -120,6 +126,7 @@ impl App {
             let (text, color) = status.badge();
             ui.label(egui::RichText::new(text).color(color).strong())
                 .on_hover_text(status.describe());
+            self.tabs[self.active].trust_label(ui);
             let edit = ui.add(
                 egui::TextEdit::singleline(&mut self.address)
                     .hint_text("uw://example.org/package, or a package directory")
@@ -169,7 +176,7 @@ impl eframe::App for App {
         for tab in &mut self.tabs {
             tab.sandbox = self.sandbox;
             tab.allow_declared = self.allow_declared;
-            tab.poll(ctx, &self.store);
+            tab.poll(ctx, &self.store, &self.trust);
         }
         egui::TopBottomPanel::top("chrome").show(ctx, |ui| {
             self.tab_bar(ui);

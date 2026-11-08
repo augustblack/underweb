@@ -7,14 +7,14 @@ use std::time::Instant;
 
 use eframe::egui;
 use underweb_core::{
-    Decision, GrantState, Guest, GuestEvent, Origin, Resolved, SpawnOptions, Store,
-    UW_POINTER_MOVE, UW_POINTER_PRESS, UW_POINTER_RELEASE,
+    Decision, GrantState, Guest, GuestEvent, Origin, Resolved, SpawnOptions, Store, Trust,
+    UW_POINTER_MOVE, UW_POINTER_PRESS, UW_POINTER_RELEASE, Verdict,
 };
 
 /// Messages from the thread that resolves (downloads, builds) a package.
 enum Loading {
     Progress(String),
-    Done(Result<Resolved, String>),
+    Done(Box<Result<(Resolved, Option<Verdict>), String>>),
 }
 
 pub enum Status {
@@ -85,6 +85,8 @@ pub struct Tab {
     loading: Option<Receiver<Loading>>,
     /// Permission requests waiting for the user: (id, description).
     prompts: Vec<(u64, String)>,
+    /// Who published and vouches for the package (remote packages).
+    pub verdict: Option<Verdict>,
 }
 
 impl Tab {
@@ -104,6 +106,7 @@ impl Tab {
             started: false,
             loading: None,
             prompts: Vec::new(),
+            verdict: None,
         }
     }
 
@@ -138,19 +141,20 @@ impl Tab {
         self.started = false;
         self.loading = None;
         self.prompts.clear();
+        self.verdict = None;
         self.status = Status::Empty;
     }
 
     /// Resolve the address on a background thread: remote packages may
     /// need downloading and building.
-    fn start(&mut self, ctx: &egui::Context, store: &Arc<Store>) {
+    fn start(&mut self, ctx: &egui::Context, store: &Arc<Store>, trust: &Arc<Trust>) {
         self.started = true;
         if self.address.is_empty() {
             return;
         }
         let address = expand_example(&self.address);
         let (tx, rx) = mpsc::channel();
-        let (store, ctx) = (store.clone(), ctx.clone());
+        let (store, trust, ctx) = (store.clone(), trust.clone(), ctx.clone());
         std::thread::spawn(move || {
             let progress = |l: &str| {
                 let _ = tx.send(Loading::Progress(l.to_string()));
@@ -158,8 +162,12 @@ impl Tab {
             };
             let result = store
                 .open(&address, &progress)
+                .map(|r| {
+                    let verdict = r.subject.as_ref().map(|s| trust.check(s, &progress));
+                    (r, verdict)
+                })
                 .map_err(|e| format!("{e:#}"));
-            let _ = tx.send(Loading::Done(result));
+            let _ = tx.send(Loading::Done(Box::new(result)));
             ctx.request_repaint();
         });
         self.loading = Some(rx);
@@ -177,7 +185,11 @@ impl Tab {
             sandbox: self.sandbox,
             params: resolved.params,
             identity,
-            permissions: if self.allow_declared {
+            // trust can grant what the package declared; it never turns
+            // off the sandbox
+            permissions: if self.allow_declared
+                || self.verdict.as_ref().is_some_and(|v| v.auto_grant)
+            {
                 underweb_core::PermissionPolicy::AllowDeclared
             } else {
                 underweb_core::PermissionPolicy::Ask
@@ -211,9 +223,9 @@ impl Tab {
     }
 
     /// Drain runner events.
-    pub fn poll(&mut self, ctx: &egui::Context, store: &Arc<Store>) {
+    pub fn poll(&mut self, ctx: &egui::Context, store: &Arc<Store>, trust: &Arc<Trust>) {
         if !self.started {
-            self.start(ctx, store);
+            self.start(ctx, store, trust);
         }
         if let Some(rx) = &self.loading {
             let mut done = None;
@@ -223,12 +235,21 @@ impl Tab {
                         self.log.push(l.clone());
                         self.status = Status::Loading(l);
                     }
-                    Loading::Done(r) => done = Some(r),
+                    Loading::Done(r) => done = Some(*r),
                 }
             }
             match done {
-                Some(Ok(resolved)) => {
+                Some(Ok((resolved, verdict))) => {
                     self.loading = None;
+                    if let Some(v) = &verdict {
+                        self.log.push(v.summary());
+                        self.log.extend(
+                            v.rejected
+                                .iter()
+                                .map(|r| format!("ignored a statement: {r}")),
+                        );
+                    }
+                    self.verdict = verdict;
                     self.spawn(ctx, resolved);
                 }
                 Some(Err(e)) => {
@@ -325,8 +346,43 @@ impl Tab {
         });
     }
 
+    /// One line about who published and vouches for this package.
+    pub fn trust_label(&self, ui: &mut egui::Ui) {
+        let Some(v) = &self.verdict else { return };
+        let bad = !v.warnings.is_empty() || v.publisher_problem.is_some();
+        let color = if bad {
+            egui::Color32::RED
+        } else if !v.vouches.is_empty() {
+            egui::Color32::from_rgb(30, 140, 60)
+        } else {
+            egui::Color32::GRAY
+        };
+        ui.label(egui::RichText::new(v.summary()).color(color)).on_hover_text(if v.auto_grant {
+            "People you follow vouch for this exact version, so its declared permissions were granted without asking."
+        } else {
+            "Its declared permissions will be asked for."
+        });
+    }
+
     /// What the package declared and what was decided.
     pub fn permissions_ui(&mut self, ui: &mut egui::Ui) {
+        if let Some(v) = &self.verdict {
+            ui.strong("Trust");
+            ui.label(v.summary());
+            for (s, level) in &v.vouches {
+                ui.label(format!("  ✔ {} ({}) — {level:?}", s.name, s.network));
+            }
+            for (s, note) in &v.warnings {
+                ui.colored_label(
+                    egui::Color32::RED,
+                    format!("  ⚠ {} ({}): {note}", s.name, s.network),
+                );
+            }
+            for r in &v.rejected {
+                ui.weak(format!("  ignored: {r}"));
+            }
+            ui.separator();
+        }
         let Some(g) = &self.guest else {
             ui.weak("No package open.");
             return;

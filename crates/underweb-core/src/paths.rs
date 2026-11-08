@@ -19,7 +19,7 @@ pub fn runner_path() -> PathBuf {
     dir.join(name)
 }
 
-fn base_dir() -> PathBuf {
+pub(crate) fn base_dir() -> PathBuf {
     let home = std::env::var_os("HOME")
         .map(PathBuf::from)
         .unwrap_or_else(std::env::temp_dir);

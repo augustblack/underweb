@@ -1,0 +1,18 @@
+[package]
+name = "underweb-trust"
+description = "Signed statements about packages, verification, and the trust policy"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+serde.workspace = true
+serde_json = "1"
+toml.workspace = true
+ed25519-dalek = "2"
+getrandom = "0.3"
+base64 = "0.22"
+
+[dev-dependencies]
+tempfile = "3"

@@ -29,11 +29,26 @@ pub enum Origin {
     },
 }
 
+/// What trust decisions are about: one archive of one release.
+#[derive(Debug, Clone)]
+pub struct Subject {
+    pub package: String,
+    pub version: String,
+    /// The archive that was run.
+    pub hash: String,
+    /// Every archive of the release (what a vouch covers).
+    pub release_hashes: Vec<String>,
+    /// The publisher's signed release statement, if the index has one.
+    pub release_statement: Option<String>,
+}
+
 #[derive(Debug, Clone)]
 pub struct Resolved {
     pub dir: PathBuf,
     pub params: Vec<(String, String)>,
     pub origin: Origin,
+    /// Remote packages only.
+    pub subject: Option<Subject>,
 }
 
 pub struct Store {
@@ -102,6 +117,7 @@ impl Store {
                     dir: pkg.dir,
                     params: parsed.params,
                     origin: Origin::Local,
+                    subject: None,
                 })
             }
             Address::Remote { name, version, .. } => {
@@ -144,6 +160,13 @@ impl Store {
                     self.build(&pkg, progress)?;
                     built = true;
                 }
+                let subject = Subject {
+                    package: name.clone(),
+                    version: release.version.clone(),
+                    hash: artifact.blake3.clone(),
+                    release_hashes: release.hashes(),
+                    release_statement: release.statement.clone(),
+                };
                 Ok(Resolved {
                     dir,
                     params: parsed.params,
@@ -152,6 +175,7 @@ impl Store {
                         version: release.version.clone(),
                         built_from_source: built,
                     },
+                    subject: Some(subject),
                 })
             }
         }
