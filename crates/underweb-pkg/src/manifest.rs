@@ -97,9 +97,7 @@ pub struct Package {
 
 impl Package {
     pub fn open(dir: impl AsRef<Path>) -> Result<Package> {
-        let dir = dir
-            .as_ref()
-            .canonicalize()
+        let dir = crate::canonical(dir.as_ref())
             .with_context(|| format!("package {}", dir.as_ref().display()))?;
         let path = dir.join(MANIFEST);
         let text = std::fs::read_to_string(&path)

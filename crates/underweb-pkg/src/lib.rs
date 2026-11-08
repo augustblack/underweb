@@ -25,9 +25,22 @@ pub use publish::{
 };
 
 /// `path.canonicalize()`, but without Windows' `\\?\` prefix where the
-/// plain form means the same: compilers and cargo don't accept it.
+/// plain form means the same: compilers, cargo and file URLs don't take it.
+///
+/// Inside a Windows AppContainer `canonicalize` fails (it asks the mount
+/// manager, which containers may not), so there an existing path is
+/// made absolute instead.
 pub fn canonical(path: &std::path::Path) -> std::io::Result<std::path::PathBuf> {
-    let p = path.canonicalize()?;
+    let p = match path.canonicalize() {
+        Ok(p) => p,
+        Err(e) if cfg!(windows) => {
+            if !path.try_exists()? {
+                return Err(e);
+            }
+            std::path::absolute(path)?
+        }
+        Err(e) => return Err(e),
+    };
     #[cfg(windows)]
     {
         let s = p.to_string_lossy();

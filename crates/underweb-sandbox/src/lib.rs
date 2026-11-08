@@ -73,8 +73,15 @@ pub fn is_supported() -> bool {
 
 /// Restrict the current process. Irreversible.
 pub fn lockdown(policy: &Policy) -> Result<()> {
-    let policy = policy.canonical()?;
-    imp(&policy)
+    // Windows applied the policy when the process was created (and a
+    // container can't resolve paths: canonicalize asks the mount manager)
+    #[cfg(windows)]
+    return imp(policy);
+    #[cfg(not(windows))]
+    {
+        let policy = policy.canonical()?;
+        imp(&policy)
+    }
 }
 
 #[cfg(target_os = "macos")]
