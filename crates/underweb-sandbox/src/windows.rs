@@ -121,8 +121,9 @@ pub fn lockdown(_policy: &Policy) -> Result<()> {
         1,
         "extension point policy",
     )?;
-    // no DLLs from network shares or low-integrity files
-    set(ProcessImageLoadPolicy, 0b11, "image load policy")?;
+    // no DLLs from network shares (low-integrity ones are fine: every
+    // package library the sandboxed builder makes is low integrity)
+    set(ProcessImageLoadPolicy, 0b01, "image load policy")?;
     // a bad handle is a crash, not a silent error
     set(ProcessStrictHandleCheckPolicy, 0b11, "strict handle policy")?;
     Ok(())
@@ -1101,6 +1102,42 @@ mod tests {
         eprintln!("exec: {code:?} {out}");
         assert_ne!(code, Some(0), "started a program: {out}");
         let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// A container allowed to start programs (the builder) can run one
+    /// from a granted user folder (as cargo runs rustc from ~/.rustup).
+    #[test]
+    fn exec_container_runs_programs_from_granted_folders() {
+        use crate::{Container, Launch, Policy};
+        let dir = std::env::temp_dir().join(format!("uw-exec-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let system32 = PathBuf::from(std::env::var_os("SystemRoot").unwrap()).join("System32");
+        let tool = dir.join("tool.exe");
+        // a copy of cmd.exe, which needs no language files beside it
+        std::fs::copy(system32.join("cmd.exe"), &tool).unwrap();
+        let mut l = Launch::new(system32.join("cmd.exe"));
+        l.arg("/C").arg(format!("{} /C exit 0", tool.display()));
+        l.pipe_stderr = true;
+        l.container = Some(Container {
+            name: "underweb-sandbox-exec-test".into(),
+            policy: Policy {
+                read_only: vec![dir.clone()],
+                read_write: vec![],
+                allow_exec: true,
+            },
+            capabilities: vec![],
+        });
+        let mut p = l.spawn().expect("starting cmd.exe in a container");
+        let mut out = String::new();
+        p.take_stderr().unwrap().read_to_string(&mut out).unwrap();
+        let code = p.wait().unwrap().code();
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(
+            code,
+            Some(0),
+            "running {} in the container: {out}",
+            tool.display()
+        );
     }
 
     #[test]

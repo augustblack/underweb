@@ -32,6 +32,9 @@ jobs:
 
       - name: Build and test (includes the sandbox tests)
         run: cargo xtask test
+        env:
+          # runners print their start-up steps (Windows is only seen here)
+          UNDERWEB_TRACE: ${{ runner.os == 'Windows' && '1' || '' }}
 
       - name: Clippy
         run: cargo clippy --workspace --all-targets -- -D warnings

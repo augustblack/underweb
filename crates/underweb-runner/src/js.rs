@@ -714,6 +714,7 @@ impl JsPage {
         let tokio = tokio::runtime::Builder::new_current_thread()
             .enable_time()
             .build()?;
+        crate::trace("tokio ready");
         let runtime = {
             let _context = tokio.enter();
             JsRuntime::new(RuntimeOptions {

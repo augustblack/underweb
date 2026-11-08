@@ -90,10 +90,21 @@ fn main() {
     }
 }
 
+/// With `UNDERWEB_TRACE` set, say how far start-up got (for platforms
+/// where a runner can only be watched from CI logs).
+pub(crate) fn trace(step: &str) {
+    if std::env::var("UNDERWEB_TRACE").is_ok_and(|v| !v.is_empty()) {
+        eprintln!("underweb-runner[{}]: {step}", std::process::id());
+    }
+}
+
 fn run(chan: &Channel, args: Args) -> Result<()> {
+    trace("connected");
     let pkg = Package::open(&args.package)?;
     std::fs::create_dir_all(&args.data).context("creating data dir")?;
+    trace("package open");
     underweb_guest::warm_up_fonts();
+    trace("fonts ready");
 
     let scene = Rc::new(RefCell::new(Scene::new()));
     let audio = Rc::new(audio::Audio::new(chan, args.audio_rate, &pkg.dir));
@@ -123,8 +134,11 @@ fn run(chan: &Channel, args: Args) -> Result<()> {
     match pkg.kind() {
         Kind::Js | Kind::Ts => {
             let mut page = js::JsPage::new(&pkg, scene.clone(), chan, &args.data, audio.clone())?;
+            trace("V8 ready");
             lock(chan)?;
+            trace("locked down");
             page.load()?;
+            trace("page loaded");
             page::run(chan, &scene, &mut page, &audio)
         }
         Kind::Rust | Kind::C => {

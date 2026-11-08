@@ -14,6 +14,9 @@ pub(crate) fn with_channel(program: &Path, theirs: &Channel) -> Result<Launch> {
     let mut l = Launch::new(program);
     l.arg("--ipc").arg(end.arg);
     l.inherit = end.handles;
+    if let Some(v) = std::env::var_os("UNDERWEB_TRACE") {
+        l.env("UNDERWEB_TRACE", v);
+    }
     #[cfg(windows)]
     l.env("PATH", underweb_sandbox::child_path(program));
     Ok(l)
