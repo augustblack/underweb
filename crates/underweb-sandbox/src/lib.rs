@@ -114,6 +114,8 @@ pub fn system_read_paths(exec: bool) -> Vec<PathBuf> {
                 "/Library/Developer",
                 "/Applications/Xcode.app",
                 "/private/var/db/xcode_select_link",
+                // where xcrun looks up whether the Xcode license was accepted
+                "/Library/Preferences/com.apple.dt.Xcode.plist",
                 "/private/var/select",
                 "/private/etc",
             ]

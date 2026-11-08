@@ -6,10 +6,8 @@ use std::process::Command;
 
 #[test]
 fn c_program_embeds_the_engine() {
-    let root = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../..")
-        .canonicalize()
-        .unwrap();
+    let root =
+        underweb_pkg::canonical(&Path::new(env!("CARGO_MANIFEST_DIR")).join("../..")).unwrap();
     let target = root.join("target/debug");
     let lib = target.join(if cfg!(target_os = "macos") {
         "libunderweb_engine.dylib"

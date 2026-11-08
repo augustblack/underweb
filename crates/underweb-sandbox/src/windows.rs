@@ -157,7 +157,25 @@ impl Drop for Sid {
     }
 }
 
+/// Profiles are created one at a time: concurrent creation fails now and
+/// then with E_UNEXPECTED (several packages starting at once).
+static PROFILES: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 fn container_sid(name: &str) -> Result<Sid> {
+    let _one_at_a_time = PROFILES.lock().unwrap_or_else(|e| e.into_inner());
+    let mut tries = 0;
+    loop {
+        match try_container_sid(name) {
+            Err(_) if tries < 5 => {
+                tries += 1;
+                std::thread::sleep(std::time::Duration::from_millis(50 * tries));
+            }
+            r => return r,
+        }
+    }
+}
+
+fn try_container_sid(name: &str) -> Result<Sid> {
     // profile names: up to 64 chars of letters, digits, '.', '-'
     let profile = format!("underweb.{:016x}", fnv1a(name.as_bytes()));
     let wname = wide(&profile);
@@ -407,7 +425,23 @@ fn command_line(l: &Launch) -> Vec<u16> {
 /// process needs added if missing.
 fn environment(l: &Launch) -> Vec<u16> {
     let mut vars: Vec<(OsString, OsString)> = l.env.clone();
-    for k in ["SystemRoot", "windir"] {
+    // Windows itself, and (for an AppContainer) the per-user folders the
+    // system redirects into the container's own: CreateProcess fails
+    // with ERROR_ENVVAR_NOT_FOUND without them
+    let needed: &[&str] = if l.container.is_some() {
+        &[
+            "SystemRoot",
+            "windir",
+            "LOCALAPPDATA",
+            "APPDATA",
+            "USERPROFILE",
+            "TEMP",
+            "TMP",
+        ]
+    } else {
+        &["SystemRoot", "windir"]
+    };
+    for k in needed.iter().copied() {
         if !vars.iter().any(|(n, _)| n.eq_ignore_ascii_case(k))
             && let Some(v) = std::env::var_os(k)
         {

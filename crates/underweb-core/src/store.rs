@@ -88,9 +88,7 @@ impl Store {
             .map(PathBuf::from)
             .or_else(installed_sdk)
             .unwrap_or_else(|| {
-                Path::new(env!("CARGO_MANIFEST_DIR"))
-                    .join("../..")
-                    .canonicalize()
+                underweb_pkg::canonical(&Path::new(env!("CARGO_MANIFEST_DIR")).join("../.."))
                     .unwrap_or_default()
             });
         Store {
@@ -379,7 +377,7 @@ fn installed_sdk() -> Option<PathBuf> {
     ]
     .into_iter()
     .find(|d| d.join("crates/underweb/Cargo.toml").is_file())
-    .and_then(|d| d.canonicalize().ok())
+    .and_then(|d| underweb_pkg::canonical(&d).ok())
 }
 
 /// PATH for the builder: the given directories, wherever `pkg-config`

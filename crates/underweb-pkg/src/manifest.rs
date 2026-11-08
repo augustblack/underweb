@@ -227,7 +227,16 @@ pub fn valid_name(name: &str) -> bool {
 /// Paths in a manifest must stay inside the package.
 fn relative(p: &str) -> Result<()> {
     let path = Path::new(p);
-    if path.is_absolute() || path.components().any(|c| matches!(c, Component::ParentDir)) {
+    // RootDir and Prefix too: on Windows "/etc/passwd" and "C:x" are not
+    // "absolute", but they still leave the package
+    if path.is_absolute()
+        || path.components().any(|c| {
+            matches!(
+                c,
+                Component::ParentDir | Component::RootDir | Component::Prefix(_)
+            )
+        })
+    {
         bail!("path {p:?} must be relative and inside the package");
     }
     Ok(())

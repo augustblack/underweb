@@ -5882,6 +5882,7 @@ name = "underweb-capi"
 version = "0.1.0"
 dependencies = [
  "underweb-core",
+ "underweb-pkg",
 ]
 
 [[package]]
