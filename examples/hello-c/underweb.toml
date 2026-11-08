@@ -17,6 +17,9 @@ file = "dist/x86_64-unknown-linux-gnu/libhello_c.so"
 [targets.aarch64-unknown-linux-gnu]
 file = "dist/aarch64-unknown-linux-gnu/libhello_c.so"
 
+[targets.x86_64-pc-windows-msvc]
+file = "dist/x86_64-pc-windows-msvc/hello_c.dll"
+
 # for machines with no prebuilt library: the browser compiles this itself
 [build]
 sources = ["hello_c.c"]

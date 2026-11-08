@@ -1,0 +1,6 @@
+# keep LF on Windows checkouts too (generated header check, tests)
+* text=auto eol=lf
+*.png binary
+*.jpg binary
+*.gif binary
+*.pd text eol=lf

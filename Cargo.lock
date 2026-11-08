@@ -5889,6 +5889,7 @@ name = "underweb-cli"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "serde_json",
  "tiny_http",
  "underweb-core",
  "underweb-export",
@@ -5909,6 +5910,7 @@ dependencies = [
  "underweb-audio",
  "underweb-ipc",
  "underweb-pkg",
+ "underweb-sandbox",
  "underweb-trust",
  "underweb-trust-atproto",
  "ureq",
@@ -5945,6 +5947,7 @@ dependencies = [
  "nix",
  "postcard",
  "serde",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -6002,6 +6005,7 @@ dependencies = [
  "landlock",
  "libc",
  "seccompiler",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -7216,6 +7220,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "cbindgen",
+ "object",
 ]
 
 [[package]]

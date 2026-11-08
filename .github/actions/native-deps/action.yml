@@ -1,0 +1,52 @@
+name: Native libraries
+description: cairo, pango and GStreamer for this runner, plus the C compiler setup
+
+runs:
+  using: composite
+  steps:
+    - name: macOS
+      if: runner.os == 'macOS'
+      shell: bash
+      run: brew install cairo pango pkgconf cmake gstreamer
+
+    - name: Linux
+      if: runner.os == 'Linux'
+      shell: bash
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y pkg-config libcairo2-dev libpango1.0-dev \
+          libxkbcommon-dev libwayland-dev libx11-dev fonts-dejavu-core \
+          libasound2-dev cmake clang libclang-dev \
+          libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev \
+          gstreamer1.0-plugins-base gstreamer1.0-plugins-good gstreamer1.0-libav
+
+    # cl.exe, link.exe and the Windows SDK on PATH (C packages, tests)
+    - name: Windows compiler
+      if: runner.os == 'Windows'
+      uses: ilammy/msvc-dev-cmd@v1
+
+    # GStreamer's MSVC packages carry their own glib, cairo and pango;
+    # using those for everything keeps a single glib in each process
+    - name: Windows GStreamer (with cairo and pango)
+      if: runner.os == 'Windows'
+      shell: pwsh
+      run: |
+        $v = "1.24.12"
+        $base = "https://gstreamer.freedesktop.org/data/pkg/windows/$v/msvc"
+        foreach ($f in "gstreamer-1.0-msvc-x86_64-$v.msi", "gstreamer-1.0-devel-msvc-x86_64-$v.msi") {
+          Invoke-WebRequest "$base/$f" -OutFile "$env:RUNNER_TEMP\$f"
+          $p = Start-Process msiexec -Wait -PassThru -ArgumentList "/i `"$env:RUNNER_TEMP\$f`" /qn ADDLOCAL=ALL"
+          if ($p.ExitCode -ne 0) { throw "installing $f failed ($($p.ExitCode))" }
+        }
+        $root = @("C:\Program Files\gstreamer\1.0\msvc_x86_64", "C:\gstreamer\1.0\msvc_x86_64") |
+          Where-Object { Test-Path "$_\bin\gstreamer-1.0-0.dll" } | Select-Object -First 1
+        if (-not $root) { throw "GStreamer did not install where expected" }
+        if (-not (Test-Path "$root\bin\cairo-2.dll")) { throw "this GStreamer has no cairo" }
+        "$root\bin" | Out-File -Append -Encoding utf8 $env:GITHUB_PATH
+        "PKG_CONFIG_PATH=$root\lib\pkgconfig" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
+        "GSTREAMER_1_0_ROOT_MSVC_X86_64=$root\" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
+
+    - name: Windows pkg-config
+      if: runner.os == 'Windows'
+      shell: pwsh
+      run: choco install pkgconfiglite --no-progress -y

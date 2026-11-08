@@ -19,11 +19,26 @@ pub fn runner_path() -> PathBuf {
     dir.join(name)
 }
 
-pub(crate) fn base_dir() -> PathBuf {
-    let home = std::env::var_os("HOME")
+/// The user's home directory (`HOME`, or `USERPROFILE` on Windows).
+pub(crate) fn home() -> PathBuf {
+    std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"))
         .map(PathBuf::from)
-        .unwrap_or_else(std::env::temp_dir);
-    if cfg!(target_os = "macos") {
+        .unwrap_or_else(std::env::temp_dir)
+}
+
+/// `%LOCALAPPDATA%` (Windows), where per-user state lives.
+pub(crate) fn local_app_data() -> PathBuf {
+    std::env::var_os("LOCALAPPDATA")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| home().join("AppData").join("Local"))
+}
+
+pub(crate) fn base_dir() -> PathBuf {
+    let home = home();
+    if cfg!(windows) {
+        local_app_data().join("underweb")
+    } else if cfg!(target_os = "macos") {
         home.join("Library/Application Support/underweb")
     } else if let Some(x) = std::env::var_os("XDG_DATA_HOME") {
         PathBuf::from(x).join("underweb")

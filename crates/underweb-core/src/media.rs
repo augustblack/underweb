@@ -7,7 +7,6 @@ use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::net::TcpStream;
 use std::path::{Component, Path, PathBuf};
-use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -26,7 +25,7 @@ const MAX_DOWNLOAD: u64 = 2 << 30;
 
 struct Proc {
     chan: Arc<Channel>,
-    child: Mutex<Child>,
+    child: Mutex<underweb_sandbox::Process>,
     closed: AtomicBool,
     /// Where broadcast data goes.
     uplink: Mutex<Option<TcpStream>>,
@@ -51,6 +50,17 @@ pub fn media_path() -> PathBuf {
     } else {
         "underweb-media"
     })
+}
+
+/// GStreamer plugins shipped next to the media service by `cargo xtask
+/// dist` (`Contents/PlugIns` on macOS,
+/// `lib/gstreamer-1.0` elsewhere).
+fn bundled_plugins() -> Option<PathBuf> {
+    let bin = media_path().parent()?.to_path_buf();
+    [bin.join("../PlugIns"), bin.join("../lib/gstreamer-1.0")]
+        .into_iter()
+        .find(|d| d.is_dir())
+        .and_then(|d| d.canonicalize().ok())
 }
 
 enum Source {
@@ -188,40 +198,57 @@ impl Media {
             None => None,
         };
         let (mine, theirs) = Channel::pair()?;
-        let fd = theirs.inheritable_fd()?;
         let spec = match &src {
             Source::File(f) => format!("file:{f}"),
             Source::Url(_) => "stream".into(),
             Source::Camera => "camera".into(),
             Source::Test(p) => format!("test:{p}"),
         };
-        let cache = crate::Store::default_root();
-        std::fs::create_dir_all(&cache)?;
-        let mut cmd = Command::new(media_path());
-        cmd.arg("--ipc-fd")
-            .arg(fd.to_string())
-            .arg("--source")
+        // plugins are scanned in-process; the result is cached where the
+        // media service may write
+        let registry = crate::Store::default_root().join("gstreamer");
+        std::fs::create_dir_all(&registry)?;
+        let mut cmd = crate::spawn::with_channel(&media_path(), &theirs)?;
+        cmd.arg("--source")
             .arg(&spec)
             .arg("--package")
             .arg(&self.package_dir)
             .arg("--audio-rate")
             .arg(self.sound.rate().to_string())
-            .env_clear()
-            // scan plugins in-process, cache the result where we can write
-            .env("GST_REGISTRY", cache.join("gstreamer-registry.bin"))
-            .env("GST_REGISTRY_FORK", "no")
-            .stdin(Stdio::null());
+            .env("GST_REGISTRY", registry.join("registry.bin"))
+            .env("GST_REGISTRY_FORK", "no");
+        let plugins = bundled_plugins();
+        if let Some(dir) = &plugins {
+            // an installed copy brings its own plugins; use only those
+            cmd.env("GST_PLUGIN_SYSTEM_PATH_1_0", dir)
+                .env("GST_PLUGIN_PATH_1_0", "");
+        }
         if looping {
             cmd.arg("--loop");
         }
         if broadcast.is_some() {
             cmd.arg("--broadcast");
         }
-        if !self.sandbox {
+        if self.sandbox {
+            cmd.container = Some(underweb_sandbox::Container {
+                name: format!("media:{}", self.package_dir.display()),
+                policy: underweb_sandbox::Policy {
+                    read_only: std::iter::once(self.package_dir.clone())
+                        .chain(plugins)
+                        .collect(),
+                    read_write: vec![registry],
+                    allow_exec: false,
+                },
+                capabilities: if matches!(src, Source::Camera) {
+                    vec!["webcam".into()]
+                } else {
+                    vec![]
+                },
+            });
+        } else {
             cmd.arg("--no-sandbox");
         }
-        let child = cmd
-            .spawn()
+        let child = crate::spawn::start(&cmd, &mine)
             .with_context(|| format!("starting {}", media_path().display()))?;
         drop(theirs);
         let proc = Arc::new(Proc {
@@ -251,18 +278,14 @@ impl Media {
         loop {
             match p.chan.recv::<FromMedia>() {
                 Ok(Some((FromMedia::Event(ev), fd))) => {
-                    let _ = self.to_runner.send(
-                        &HostMsg::Media { id, event: ev },
-                        fd.as_ref().map(|f| {
-                            use std::os::fd::AsRawFd;
-                            f.as_raw_fd()
-                        }),
-                    );
+                    let _ = self
+                        .to_runner
+                        .send(&HostMsg::Media { id, event: ev }, fd.as_ref().map(raw));
                 }
                 Ok(Some((FromMedia::WantsAudio, _))) => {
                     let result = (|| -> Result<()> {
                         let ring = AudioRing::create(8192)?;
-                        let fd = ring.shm().raw_fd();
+                        let fd = ring.shm().raw_handle();
                         let sid = self.sound.add_extra(ring);
                         p.sound_ids.lock().unwrap().push(sid);
                         p.chan.send(
@@ -329,6 +352,17 @@ fn close(p: &Proc) {
         std::thread::sleep(Duration::from_millis(10));
     }
     let _ = child.kill();
+}
+
+fn raw(h: &underweb_ipc::OsHandle) -> underweb_ipc::RawOsHandle {
+    #[cfg(unix)]
+    use std::os::fd::AsRawFd as _;
+    #[cfg(windows)]
+    use std::os::windows::io::AsRawHandle as _;
+    #[cfg(unix)]
+    return h.as_raw_fd();
+    #[cfg(windows)]
+    return h.as_raw_handle();
 }
 
 /// Stream an http(s) source into the media process.

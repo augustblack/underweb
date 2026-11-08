@@ -1,7 +1,7 @@
 //! `underweb-media`: one process per video stream.
 //!
 //! ```text
-//! underweb-media --ipc-fd N --source SPEC [--package DIR] [--audio-rate HZ]
+//! underweb-media --ipc END --source SPEC [--package DIR] [--audio-rate HZ]
 //!                [--loop] [--broadcast] [--no-sandbox]
 //! ```
 //!
@@ -27,7 +27,7 @@ use underweb_audio::AudioRing;
 use underweb_ipc::{Channel, FromMedia, MediaCmd, MediaEvent, Shm, ToMedia, VideoMailbox};
 
 struct Args {
-    ipc_fd: i32,
+    ipc: String,
     source: String,
     package: Option<PathBuf>,
     audio_rate: u32,
@@ -38,7 +38,7 @@ struct Args {
 
 fn parse() -> Result<Args> {
     let mut a = Args {
-        ipc_fd: -1,
+        ipc: String::new(),
         source: String::new(),
         package: None,
         audio_rate: 0,
@@ -50,7 +50,7 @@ fn parse() -> Result<Args> {
     while let Some(arg) = it.next() {
         let mut val = || it.next().with_context(|| format!("{arg} needs a value"));
         match arg.as_str() {
-            "--ipc-fd" => a.ipc_fd = val()?.parse()?,
+            "--ipc" => a.ipc = val()?,
             "--source" => a.source = val()?,
             "--package" => a.package = Some(PathBuf::from(val()?)),
             "--audio-rate" => a.audio_rate = val()?.parse()?,
@@ -60,8 +60,8 @@ fn parse() -> Result<Args> {
             other => bail!("unknown argument {other:?}"),
         }
     }
-    if a.ipc_fd < 0 || a.source.is_empty() {
-        bail!("usage: underweb-media --ipc-fd N --source SPEC ...");
+    if a.ipc.is_empty() || a.source.is_empty() {
+        bail!("usage: underweb-media --ipc END --source SPEC ...");
     }
     Ok(a)
 }
@@ -89,7 +89,7 @@ fn main() {
             std::process::exit(2);
         }
     };
-    let chan = match unsafe { Channel::from_raw_fd(args.ipc_fd) } {
+    let chan = match unsafe { Channel::from_arg(&args.ipc) } {
         Ok(c) => Arc::new(c),
         Err(e) => {
             eprintln!("underweb-media: {e:#}");
@@ -298,7 +298,7 @@ fn run(args: &Args, chan: Arc<Channel>) -> Result<()> {
             }
             ToMedia::AudioReady { capacity, .. } => {
                 if let Some(fd) = fd {
-                    let shm = Shm::from_fd(fd, AudioRing::bytes_for(capacity as usize))?;
+                    let shm = Shm::from_handle(fd, AudioRing::bytes_for(capacity as usize))?;
                     *shared.ring.lock().unwrap() = Some(AudioRing::open(shm)?);
                 }
             }
@@ -405,7 +405,9 @@ fn frame(shared: &Shared, sample: &gst::Sample) {
                     duration: 0.0,
                     has_audio: shared.has_audio.load(Ordering::SeqCst),
                 };
-                let _ = shared.chan.send(&FromMedia::Event(ready), Some(m.raw_fd()));
+                let _ = shared
+                    .chan
+                    .send(&FromMedia::Event(ready), Some(m.raw_handle()));
                 *mb = Some(m);
             }
             Err(e) => {

@@ -8,6 +8,7 @@ license.workspace = true
 [dependencies]
 anyhow.workspace = true
 underweb-ipc.workspace = true
+underweb-sandbox.workspace = true
 underweb-pkg.workspace = true
 underweb-abi.workspace = true
 underweb-audio = { workspace = true, features = ["device"] }

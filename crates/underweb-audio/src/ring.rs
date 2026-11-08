@@ -148,8 +148,14 @@ mod tests {
     #[test]
     fn write_read_wrap() {
         let host = AudioRing::create(8).unwrap();
-        let pkg =
-            AudioRing::open(Shm::from_fd(dup(&host), AudioRing::bytes_for(8)).unwrap()).unwrap();
+        let pkg = AudioRing::open(
+            Shm::from_handle(
+                host.shm().try_clone_handle().unwrap(),
+                AudioRing::bytes_for(8),
+            )
+            .unwrap(),
+        )
+        .unwrap();
         let frames: Vec<f32> = (0..12).map(|i| i as f32 / 100.0).collect(); // 6 frames
         assert_eq!(pkg.write(&frames), 6);
         assert_eq!(pkg.write(&frames), 2); // full
@@ -165,16 +171,5 @@ mod tests {
         let mut out = vec![0.0; 2];
         host.mix_into(&mut out, 2, 1.0);
         assert_eq!(out, vec![0.0, 1.0]);
-    }
-
-    fn dup(r: &AudioRing) -> std::os::fd::OwnedFd {
-        use std::os::fd::{AsRawFd, FromRawFd};
-        let fd = unsafe { libc_dup(r.shm().raw_fd().as_raw_fd()) };
-        unsafe { std::os::fd::OwnedFd::from_raw_fd(fd) }
-    }
-
-    unsafe extern "C" {
-        #[link_name = "dup"]
-        fn libc_dup(fd: i32) -> i32;
     }
 }

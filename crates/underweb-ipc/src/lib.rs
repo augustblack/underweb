@@ -1,11 +1,15 @@
 //! IPC between the host (browser) and a runner (one sandboxed process per
 //! package).
 //!
-//! Transport: a Unix stream socket created by the host with `socketpair` and
-//! inherited by the runner, so the runner never needs to look anything up
-//! after it is sandboxed. Messages are length-prefixed postcard. File
-//! descriptors (shared-memory frames now, sockets later) travel with a
-//! message as `SCM_RIGHTS`.
+//! Transport: created by the host and inherited by the runner, so the
+//! runner never needs to look anything up after it is sandboxed. Messages
+//! are length-prefixed postcard, and each can carry one OS handle (a
+//! shared-memory region):
+//!
+//! - Unix: a stream socket from `socketpair`; handles are fds sent as
+//!   `SCM_RIGHTS`.
+//! - Windows: two anonymous pipes; handles are duplicated across with
+//!   `DuplicateHandle` (see `channel_windows.rs`).
 //!
 //! Frames: the host allocates one shared-memory region holding two
 //! cairo ARGB32 buffers. The runner draws into a free buffer, sends
@@ -13,14 +17,29 @@
 //! [`HostMsg::Release`].
 
 mod channel;
+#[cfg(unix)]
+mod channel_unix;
+#[cfg(windows)]
+mod channel_windows;
 mod media;
 pub mod scene;
 mod shm;
 
-pub use channel::Channel;
+pub use channel::{Channel, ChildEnd};
 pub use media::{Broadcast, FromMedia, MAX_PIXELS, MediaCmd, MediaEvent, ToMedia, VideoMailbox};
 pub use scene::{EditOp, LayoutDoc, Matrix, PathOp, Rgba, SceneDoc, ShapeDoc};
 pub use shm::Shm;
+
+/// An owned OS handle that can travel with a message: an fd on Unix, a
+/// `HANDLE` on Windows.
+#[cfg(unix)]
+pub type OsHandle = std::os::fd::OwnedFd;
+#[cfg(unix)]
+pub type RawOsHandle = std::os::fd::RawFd;
+#[cfg(windows)]
+pub type OsHandle = std::os::windows::io::OwnedHandle;
+#[cfg(windows)]
+pub type RawOsHandle = std::os::windows::io::RawHandle;
 
 use serde::{Deserialize, Serialize};
 

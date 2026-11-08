@@ -77,9 +77,15 @@ impl Page for Probe {
                 r.map(|_| addr.to_string()).map_err(|e| e.to_string()),
             );
         }
-        let r = std::process::Command::new("/bin/sh")
-            .args(["-c", "true"])
-            .status();
+        let r = if cfg!(windows) {
+            std::process::Command::new("cmd.exe")
+                .args(["/C", "exit 0"])
+                .status()
+        } else {
+            std::process::Command::new("/bin/sh")
+                .args(["-c", "true"])
+                .status()
+        };
         report(
             w,
             "exec",

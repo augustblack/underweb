@@ -20,6 +20,7 @@ mod broker;
 mod guest;
 mod media;
 mod paths;
+mod spawn;
 mod store;
 mod trust;
 

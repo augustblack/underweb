@@ -63,11 +63,11 @@ impl VideoMailbox {
     }
 
     /// Reader side: map a mailbox received with its size.
-    pub fn open(fd: std::os::fd::OwnedFd, width: u32, height: u32) -> Result<VideoMailbox> {
+    pub fn open(handle: crate::OsHandle, width: u32, height: u32) -> Result<VideoMailbox> {
         if width == 0 || height == 0 || width as u64 * height as u64 > MAX_PIXELS {
             bail!("video size {width}x{height} not supported");
         }
-        let shm = Shm::from_fd(fd, VideoMailbox::bytes_for(width, height))?;
+        let shm = Shm::from_handle(handle, VideoMailbox::bytes_for(width, height))?;
         let m = VideoMailbox {
             shm,
             width,
@@ -84,8 +84,8 @@ impl VideoMailbox {
         Ok(m)
     }
 
-    pub fn raw_fd(&self) -> std::os::fd::RawFd {
-        self.shm.raw_fd()
+    pub fn raw_handle(&self) -> crate::RawOsHandle {
+        self.shm.raw_handle()
     }
 
     fn header(&self) -> &Header {
@@ -233,8 +233,7 @@ mod tests {
         assert!(w.read_frame(&mut out).is_none());
         let src: Vec<u8> = (0..40u8).collect(); // stride 20, 2 rows
         w.write_frame(&src, 20);
-        let dup =
-            nix::unistd::dup(unsafe { std::os::fd::BorrowedFd::borrow_raw(w.raw_fd()) }).unwrap();
+        let dup = w.shm.try_clone_handle().unwrap();
         let r = VideoMailbox::open(dup, 4, 2).unwrap();
         assert_eq!(r.read_frame(&mut out), Some(1));
         assert_eq!(&out[..16], &src[..16]);

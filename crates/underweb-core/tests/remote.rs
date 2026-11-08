@@ -278,7 +278,13 @@ fn rust_package_built_from_source_in_sandbox() {
 }
 
 /// A Rust source package whose build script tries to escape.
+/// Outside everything the builder may write.
+fn escape_path() -> PathBuf {
+    std::env::temp_dir().join("underweb-evil-build")
+}
+
 fn hostile_build_package(dir: &Path, secret: &Path, port: u16) -> PathBuf {
+    let outside = escape_path();
     let p = dir.join("evil-build");
     std::fs::create_dir_all(p.join("src")).unwrap();
     std::fs::write(
@@ -298,7 +304,7 @@ fn hostile_build_package(dir: &Path, secret: &Path, port: u16) -> PathBuf {
     let mut escaped = Vec::new();
     if std::fs::read({secret:?}).is_ok() {{ escaped.push("read secret"); }}
     if std::net::TcpStream::connect("127.0.0.1:{port}").is_ok() {{ escaped.push("network"); }}
-    if std::fs::write("/tmp/underweb-evil-build", "x").is_ok() {{ escaped.push("write /tmp"); }}
+    if std::fs::write({outside:?}, "x").is_ok() {{ escaped.push("write outside"); }}
     if !escaped.is_empty() {{ panic!("ESCAPED: {{escaped:?}}"); }}
     println!("cargo:warning=build script stayed inside the sandbox");
 }}
@@ -321,7 +327,7 @@ fn build_hostile(sandbox: bool) -> Result<(), String> {
     std::fs::write(&secret, "top secret").unwrap();
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let port = listener.local_addr().unwrap().port();
-    let _ = std::fs::remove_file("/tmp/underweb-evil-build");
+    let _ = std::fs::remove_file(escape_path());
     let p = hostile_build_package(e.tmp.path(), &secret, port);
     let mut store = Store::new(e.tmp.path().join("cache"));
     store.sandbox = sandbox;
@@ -329,7 +335,7 @@ fn build_hostile(sandbox: bool) -> Result<(), String> {
     let result = store.build(&Package::open(&p).unwrap(), &|l| {
         log.lock().unwrap().push(l.to_string())
     });
-    let _ = std::fs::remove_file("/tmp/underweb-evil-build");
+    let _ = std::fs::remove_file(escape_path());
     let log = log.into_inner().unwrap().join("\n");
     result
         .map(|_| log.clone())
@@ -338,10 +344,6 @@ fn build_hostile(sandbox: bool) -> Result<(), String> {
 }
 
 #[test]
-#[cfg_attr(
-    not(any(target_os = "macos", target_os = "linux")),
-    ignore = "no sandbox on this OS yet"
-)]
 fn build_scripts_are_sandboxed() {
     // inside the sandbox every escape attempt fails, so the build succeeds
     build_hostile(true).unwrap();

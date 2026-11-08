@@ -44,7 +44,9 @@ pub struct Editor {
 
 impl Editor {
     pub fn new(package_name: &str) -> Editor {
-        let home = std::env::var_os("HOME").map_or(PathBuf::from("."), PathBuf::from);
+        let home = std::env::var_os("HOME")
+            .or_else(|| std::env::var_os("USERPROFILE"))
+            .map_or(PathBuf::from("."), PathBuf::from);
         Editor {
             doc: SceneDoc::default(),
             selected: None,

@@ -8,13 +8,15 @@ sandboxed process.
 This is a Rust rewrite of the 2011 Vala project. See
 [docs/ROADMAP.md](docs/ROADMAP.md) for the design and phases.
 
-## Status: phases 0–4 and 6–8
+## Status: phases 0–4 and 6–9
 
 Working on macOS:
 
 - the browser: tabs, an address bar, a sandbox badge, a log panel
 - one `underweb-runner` process per tab, sandboxed before any package code
-  loads (macOS: `sandbox_init`; Linux: Landlock + seccomp, tested in CI only)
+  loads (macOS: `sandbox_init`; Linux: Landlock + seccomp; Windows: an
+  AppContainer and a job object chosen when the process is created; Linux
+  and Windows are tested in CI only)
 - JS and TS packages in V8 (deno_core), with TypeScript transpiled by
   deno_ast. They get the Underweb API and nothing else: no Deno, Node or
   fetch.
@@ -56,7 +58,11 @@ Working on macOS:
   turns off the sandbox. Identities can be Bluesky accounts, domains, or
   bare keys; vouches live on Bluesky or in signed lists.
 
-Not yet: CEF web pages (5, skipped for now) and Windows (9).
+- release archives for macOS, Linux and Windows (`cargo xtask dist`, and
+  the Release workflow on a `v*` tag), signed with a release statement
+  that `uw verify-release` checks
+
+Not yet: CEF web pages (5, skipped for now).
 
 ## Build and run
 
@@ -68,6 +74,16 @@ sudo apt install libcairo2-dev libpango1.0-dev pkg-config cmake clang \
   libclang-dev libasound2-dev libxkbcommon-dev libwayland-dev \
   libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev \
   gstreamer1.0-plugins-good gstreamer1.0-libav            # Debian/Ubuntu
+```
+
+On Windows: Visual Studio Build Tools (run from a developer prompt so
+`cl.exe` is on `PATH`), GStreamer's MSVC runtime and development
+installers (they include cairo and pango), and `pkg-config`
+(`choco install pkgconfiglite`), with GStreamer's `bin` on `PATH` and its
+`lib\pkgconfig` in `PKG_CONFIG_PATH`; see
+[.github/actions/native-deps](.github/actions/native-deps/action.yml).
+
+```sh
 
 cargo xtask examples          # builds the runner and the native example packages
 cargo run -p underweb-app -- hello-js hello-ts hello-rust hello-c
@@ -82,6 +98,24 @@ debugging, and the badge turns red.
 sandbox tests: a probe package tries to read your files, write outside its
 folder, open a TCP connection and run `/bin/sh`, and every attempt must
 fail. The same probe with the sandbox off must succeed.
+
+## Releases
+
+`cargo xtask dist` builds a release archive for this machine in
+`target/dist/`: `Underweb.app` in a zip on macOS (Homebrew libraries and
+GStreamer plugins bundled), a zip with every DLL on Windows, a tarball on
+Linux (using the system's libraries). It signs what it can from the
+environment (see `xtask/src/dist.rs`): a Developer ID and notarization on
+macOS, Authenticode on Windows, ad-hoc otherwise.
+
+Pushing a `v*` tag runs the Release workflow on all platforms and drafts a
+GitHub release with the archives, `SHA256SUMS`, and (with the
+`UNDERWEB_RELEASE_KEY` secret) a signed release statement:
+
+```sh
+uw sign-release target/dist/underweb-* --name underweb --version 0.1.0 --key KEYFILE --out release.json
+uw verify-release release.json underweb-0.1.0-aarch64-apple-darwin.zip --key <public key>
+```
 
 ## Publishing
 
@@ -237,7 +271,7 @@ See `examples/` for the same idea in Rust (the `underweb` crate and
 | `crates/underweb-trust` | signed statements, keys, the trust store and policy, signed lists |
 | `crates/underweb-trust-atproto` | Bluesky/ATProto: identities, keys, statements, follows |
 | `sdk/js` | TypeScript types for JS/TS packages |
-| `xtask` | `cargo xtask examples / header / test` |
+| `xtask` | `cargo xtask examples / header / test / dist` |
 
 ## License
 

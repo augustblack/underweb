@@ -20,6 +20,12 @@
 //! uw unfollow ID
 //! uw trust                                show who you follow and the policy
 //! uw check ADDRESS                        who published and vouches for a package
+//!
+//! uw sign-release FILE... --name NAME --version V [--key KEYFILE] [--as ID] [--out FILE]
+//!                                         sign a release statement for files
+//!                                         (Underweb's own release archives)
+//! uw verify-release STATEMENT FILE... [--key PUBLIC-KEY]
+//!                                         check files against a signed statement
 //! ```
 //!
 //! `--sign --as dns:example.org` signs a release as the domain the
@@ -59,7 +65,9 @@ const USAGE: &str = "usage:
   uw vouch ADDRESS [--level used|reviewed|warn] [--note TEXT] (--list FILE [--name NAME] | --bluesky HANDLE)
   uw follow HANDLE|ID | uw follow --list URL|FILE | uw follow-bluesky HANDLE | uw unfollow ID
   uw trust
-  uw check ADDRESS";
+  uw check ADDRESS
+  uw sign-release FILE... --name NAME --version V [--key KEYFILE] [--as ID] [--out FILE]
+  uw verify-release STATEMENT FILE... [--key PUBLIC-KEY]";
 
 #[derive(Default)]
 struct Opts {
@@ -76,6 +84,8 @@ struct Opts {
     bluesky: Option<String>,
     lang: Option<String>,
     out: Option<PathBuf>,
+    version: Option<String>,
+    key: Option<String>,
 }
 
 fn parse(rest: &[String]) -> Result<Opts> {
@@ -105,6 +115,8 @@ fn parse(rest: &[String]) -> Result<Opts> {
             "--bluesky" => o.bluesky = Some(val()?),
             "--lang" => o.lang = Some(val()?),
             "--out" => o.out = Some(PathBuf::from(val()?)),
+            "--version" => o.version = Some(val()?),
+            "--key" => o.key = Some(val()?),
             "-h" | "--help" => usage(),
             s if s.starts_with("--") => bail!("unknown option {s}"),
             s => o.positional.push(s.to_string()),
@@ -328,8 +340,72 @@ fn run(args: Vec<String>) -> Result<()> {
                 }
             );
         }
+        "sign-release" => sign_files(&o)?,
+        "verify-release" => verify_files(&o)?,
         _ => usage(),
     }
+    Ok(())
+}
+
+/// One release statement covering `files` (by BLAKE3 hash), signed with
+/// `--key` (a key file, as `uw key` keeps) or the user's own key.
+fn sign_files(o: &Opts) -> Result<()> {
+    if o.positional.is_empty() {
+        bail!("sign-release FILE... --name NAME --version V");
+    }
+    let name = o.name.as_deref().context("--name NAME")?;
+    let version = o.version.as_deref().context("--version V")?;
+    let key = match &o.key {
+        Some(f) => underweb_core::trust_types::KeyPair::load(Path::new(f))?,
+        None => Trust::key(None)?,
+    };
+    let mut hashes = Vec::new();
+    for f in &o.positional {
+        let bytes = std::fs::read(f).with_context(|| format!("reading {f}"))?;
+        hashes.push(underweb_pkg::hash(&bytes));
+    }
+    let s = Statement::new(Kind::Release, name, version, &hashes).sign(&key, o.signer.as_deref());
+    let json = serde_json::to_string_pretty(&s)? + "\n";
+    match &o.out {
+        Some(p) => std::fs::write(p, json)?,
+        None => print!("{json}"),
+    }
+    eprintln!("signed {} file(s) as {}", hashes.len(), s.signer);
+    Ok(())
+}
+
+fn verify_files(o: &Opts) -> Result<()> {
+    let (statement, files) = o
+        .positional
+        .split_first()
+        .context("verify-release STATEMENT FILE...")?;
+    let s: Statement = serde_json::from_str(
+        &std::fs::read_to_string(statement).with_context(|| format!("reading {statement}"))?,
+    )
+    .context("not a signed statement")?;
+    if s.kind != Kind::Release {
+        bail!("{statement} is a vouch, not a release statement");
+    }
+    s.verify_signature()?;
+    match &o.key {
+        Some(k) if *k != s.key => bail!("signed by key {}, not {k}", s.key),
+        Some(_) => {}
+        None => eprintln!(
+            "note: signed by key {}; compare it with the one the project publishes, or pass --key",
+            s.key
+        ),
+    }
+    if files.is_empty() {
+        bail!("name at least one file to check");
+    }
+    for f in files {
+        let bytes = std::fs::read(f).with_context(|| format!("reading {f}"))?;
+        if !s.hashes.contains(&underweb_pkg::hash(&bytes)) {
+            bail!("{f} is not part of {} {}", s.package, s.version);
+        }
+        println!("ok  {f}");
+    }
+    println!("{} {} signed by {}", s.package, s.version, s.signer);
     Ok(())
 }
 

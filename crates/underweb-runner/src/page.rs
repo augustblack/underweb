@@ -105,7 +105,7 @@ pub fn run(
                 let len = stride as usize * height as usize * 2;
                 frames = Some(Frames {
                     generation,
-                    shm: Shm::from_fd(fd, len)?,
+                    shm: Shm::from_handle(fd, len)?,
                     width,
                     height,
                     stride,
@@ -147,7 +147,7 @@ pub fn run(
             }
             HostMsg::AudioReady { capacity } => {
                 let fd = fd.context("AudioReady without a ring")?;
-                let shm = Shm::from_fd(fd, AudioRing::bytes_for(capacity as usize))?;
+                let shm = Shm::from_handle(fd, AudioRing::bytes_for(capacity as usize))?;
                 audio.attach(AudioRing::open(shm)?);
             }
             HostMsg::EditMode(on) => {

@@ -92,7 +92,7 @@ fn run(args: impl Iterator<Item = String>) -> Result<PathBuf> {
     let out = pkg.built_library();
     std::fs::create_dir_all(out.parent().unwrap())?;
     match pkg.kind() {
-        Kind::C => build_c(&pkg, &args.sdk, &out)?,
+        Kind::C => build_c(&pkg, &args.sdk, &args.work, &out)?,
         Kind::Rust => build_rust(&pkg, &args.sdk, &args.work, &out)?,
         _ => unreachable!(),
     }
@@ -110,22 +110,42 @@ fn run_cmd(cmd: &mut Command) -> Result<()> {
     Ok(())
 }
 
-fn build_c(pkg: &Package, sdk: &Path, out: &Path) -> Result<()> {
+fn build_c(pkg: &Package, sdk: &Path, work: &Path, out: &Path) -> Result<()> {
     let b = &pkg.manifest.build;
     if b.sources.is_empty() {
         bail!("no [build] sources in underweb.toml");
     }
-    let cc = std::env::var("CC").unwrap_or_else(|_| "cc".into());
-    run_cmd(
-        Command::new(cc)
-            .current_dir(&pkg.dir)
-            .args(["-shared", "-fPIC", "-O2", "-Wall", "-I"])
-            .arg(sdk.join("include"))
-            .args(&b.cflags)
-            .args(&b.sources)
-            .arg("-o")
-            .arg(out),
-    )
+    match std::env::var("CC") {
+        // MSVC: a DLL, objects kept out of the package
+        Err(_) if cfg!(windows) => {
+            let mut fo = work.as_os_str().to_owned();
+            fo.push("\\");
+            let mut fe = std::ffi::OsString::from("/Fe:");
+            fe.push(out);
+            let mut objs = std::ffi::OsString::from("/Fo");
+            objs.push(fo);
+            run_cmd(
+                Command::new("cl.exe")
+                    .current_dir(&pkg.dir)
+                    .args(["/nologo", "/LD", "/O2", "/W3", "/I"])
+                    .arg(sdk.join("include"))
+                    .args(&b.cflags)
+                    .args(&b.sources)
+                    .arg(objs)
+                    .arg(fe),
+            )
+        }
+        cc => run_cmd(
+            Command::new(cc.unwrap_or_else(|_| "cc".into()))
+                .current_dir(&pkg.dir)
+                .args(["-shared", "-fPIC", "-O2", "-Wall", "-I"])
+                .arg(sdk.join("include"))
+                .args(&b.cflags)
+                .args(&b.sources)
+                .arg("-o")
+                .arg(out),
+        ),
+    }
 }
 
 fn build_rust(pkg: &Package, sdk: &Path, work: &Path, out: &Path) -> Result<()> {

@@ -11,7 +11,10 @@
 //! |---|---|
 //! | macOS | `sandbox_init` with an SBPL profile (what Chromium uses) |
 //! | Linux | Landlock (filesystem) + seccomp-bpf (sockets, exec, fork) |
-//! | Windows | not yet: runners are reported as unsandboxed |
+//! | Windows | AppContainer + job object, chosen by the parent at creation ([`Launch`]); `lockdown` checks it and adds mitigations |
+//!
+//! Start children with [`Launch`], which applies the Windows container
+//! (on Unix the child's own `lockdown` does the work).
 
 use std::path::{Path, PathBuf};
 
@@ -21,6 +24,15 @@ use anyhow::{Context, Result};
 mod linux;
 #[cfg(target_os = "macos")]
 mod macos;
+mod process;
+#[cfg(windows)]
+mod windows;
+
+pub use process::{Container, Launch, Process, RawInherit};
+
+/// `PATH` for a child on Windows, where DLLs are found through it.
+#[cfg(windows)]
+pub use windows::child_path;
 
 #[derive(Debug, Clone, Default)]
 pub struct Policy {
@@ -36,7 +48,7 @@ pub struct Policy {
 impl Policy {
     /// Resolve symlinks (/tmp -> /private/tmp on macOS); the kernel-side
     /// rules match real paths only.
-    fn canonical(&self) -> Result<Policy> {
+    pub(crate) fn canonical(&self) -> Result<Policy> {
         let canon = |paths: &[PathBuf]| -> Result<Vec<PathBuf>> {
             paths
                 .iter()
@@ -56,7 +68,7 @@ impl Policy {
 
 /// Whether [`lockdown`] actually restricts anything on this OS.
 pub fn is_supported() -> bool {
-    cfg!(any(target_os = "macos", target_os = "linux"))
+    cfg!(any(target_os = "macos", target_os = "linux", windows))
 }
 
 /// Restrict the current process. Irreversible.
@@ -75,7 +87,12 @@ fn imp(policy: &Policy) -> Result<()> {
     linux::lockdown(policy)
 }
 
-#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+#[cfg(windows)]
+fn imp(policy: &Policy) -> Result<()> {
+    windows::lockdown(policy)
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
 fn imp(_policy: &Policy) -> Result<()> {
     anyhow::bail!("no sandbox on this platform yet")
 }
@@ -86,7 +103,10 @@ fn imp(_policy: &Policy) -> Result<()> {
 pub fn system_read_paths(exec: bool) -> Vec<PathBuf> {
     let mut paths = base_read_paths();
     if exec {
-        let tools: &[&str] = if cfg!(target_os = "macos") {
+        let tools: &[&str] = if cfg!(windows) {
+            // compilers in Program Files are readable already
+            &[]
+        } else if cfg!(target_os = "macos") {
             &[
                 "/usr/bin",
                 "/bin",
@@ -111,6 +131,14 @@ pub fn system_read_paths(exec: bool) -> Vec<PathBuf> {
     paths
 }
 
+#[cfg(windows)]
+fn base_read_paths() -> Vec<PathBuf> {
+    // Windows, Program Files and the fonts are readable by every
+    // AppContainer already; only the GTK/GStreamer DLLs need a grant
+    windows::library_dirs()
+}
+
+#[cfg(not(windows))]
 fn base_read_paths() -> Vec<PathBuf> {
     let candidates: &[&str] = if cfg!(target_os = "macos") {
         &[

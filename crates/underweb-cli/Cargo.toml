@@ -15,3 +15,4 @@ underweb-core.workspace = true
 underweb-pkg.workspace = true
 underweb-export.workspace = true
 tiny_http = "0.12"
+serde_json = "1"

@@ -1,0 +1,136 @@
+# Release archives for every platform, on a version tag (v0.2.0) or by
+# hand. The result is a *draft* GitHub release: check it, then publish.
+#
+# Optional secrets (each step is skipped without its secrets, and the
+# archives are then ad-hoc signed / unsigned):
+#
+#   MACOS_CERT_P12, MACOS_CERT_PASSWORD   Developer ID Application cert (base64 .p12)
+#   MACOS_IDENTITY                        e.g. "Developer ID Application: Name (TEAMID)"
+#   APPLE_ID, APPLE_TEAM_ID, APPLE_APP_PASSWORD   notarization
+#   WINDOWS_CERT_PFX, WINDOWS_CERT_PASSWORD       Authenticode (base64 .pfx)
+#   UNDERWEB_RELEASE_KEY                  key file from `uw key` (base64 seed):
+#                                         signs the release statement
+
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-15, macos-15-intel, ubuntu-24.04, windows-latest]
+    runs-on: ${{ matrix.os }}
+    env:
+      MACOS_CERT_P12: ${{ secrets.MACOS_CERT_P12 }}
+      WINDOWS_CERT_PFX: ${{ secrets.WINDOWS_CERT_PFX }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: ./.github/actions/native-deps
+
+      - name: macOS signing identity
+        if: runner.os == 'macOS' && env.MACOS_CERT_P12 != ''
+        shell: bash
+        env:
+          MACOS_CERT_PASSWORD: ${{ secrets.MACOS_CERT_PASSWORD }}
+        run: |
+          kc="$RUNNER_TEMP/build.keychain"
+          pw="$(uuidgen)"
+          echo "$MACOS_CERT_P12" | base64 --decode > "$RUNNER_TEMP/cert.p12"
+          security create-keychain -p "$pw" "$kc"
+          security set-keychain-settings -lut 21600 "$kc"
+          security unlock-keychain -p "$pw" "$kc"
+          security import "$RUNNER_TEMP/cert.p12" -k "$kc" -P "$MACOS_CERT_PASSWORD" -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$pw" "$kc"
+          security list-keychains -d user -s "$kc" $(security list-keychains -d user | tr -d '"')
+          rm "$RUNNER_TEMP/cert.p12"
+
+      - name: Windows code-signing certificate
+        if: runner.os == 'Windows' && env.WINDOWS_CERT_PFX != ''
+        shell: pwsh
+        run: |
+          [IO.File]::WriteAllBytes("$env:RUNNER_TEMP\cert.pfx", [Convert]::FromBase64String($env:WINDOWS_CERT_PFX))
+          "UNDERWEB_WINDOWS_CERT=$env:RUNNER_TEMP\cert.pfx" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
+
+      - name: Build the archive
+        run: cargo xtask dist
+        env:
+          UNDERWEB_MACOS_IDENTITY: ${{ secrets.MACOS_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
+          UNDERWEB_WINDOWS_CERT_PASSWORD: ${{ secrets.WINDOWS_CERT_PASSWORD }}
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist-${{ matrix.os }}
+          path: |
+            target/dist/underweb-*.zip
+            target/dist/underweb-*.tar.gz
+          if-no-files-found: error
+
+  publish:
+    needs: build
+    runs-on: ubuntu-24.04
+    env:
+      UNDERWEB_RELEASE_KEY: ${{ secrets.UNDERWEB_RELEASE_KEY }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Version
+        shell: bash
+        run: |
+          v=$(sed -n '/^\[workspace.package\]/,/^\[/s/^version = "\(.*\)"/\1/p' Cargo.toml)
+          echo "VERSION=$v" >> "$GITHUB_ENV"
+
+      - uses: dtolnay/rust-toolchain@stable
+        if: env.UNDERWEB_RELEASE_KEY != ''
+      - uses: ./.github/actions/native-deps
+        if: env.UNDERWEB_RELEASE_KEY != ''
+      - name: Sign the release statement
+        if: env.UNDERWEB_RELEASE_KEY != ''
+        shell: bash
+        run: |
+          cargo build --release -p underweb-cli
+          key="$RUNNER_TEMP/release.key"
+          printf '%s' "$UNDERWEB_RELEASE_KEY" > "$key"
+          target/release/uw sign-release dist/underweb-* \
+            --name underweb --version "$VERSION" --key "$key" \
+            --out "dist/underweb-$VERSION.release.json"
+          rm "$key"
+
+      - name: Checksums
+        shell: bash
+        run: cd dist && sha256sum * > SHA256SUMS && cat SHA256SUMS
+
+      - name: Draft release
+        shell: bash
+        run: |
+          tag="${GITHUB_REF_NAME}"
+          case "$tag" in v*) ;; *) tag="v$VERSION-draft" ;; esac
+          gh release create "$tag" dist/* --draft --title "Underweb $VERSION" --notes "$(cat <<NOTES
+          Archives for macOS (Apple silicon, Intel), Linux (x86_64) and Windows (x86_64).
+
+          Check a download against the signed release statement:
+
+              uw verify-release underweb-$VERSION.release.json underweb-$VERSION-<target>.<ext> --key <project key>
+
+          or against SHA256SUMS.
+          NOTES
+          )"

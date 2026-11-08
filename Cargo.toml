@@ -36,6 +36,7 @@ postcard = { version = "1", features = ["use-std"] }
 toml = "1"
 nix = { version = "0.31", features = ["socket", "uio", "mman", "fs", "poll"] }
 libc = "0.2"
+windows-sys = "0.61"
 cairo-rs = { version = "0.21", features = ["png"] }
 pango = "0.21"
 pangocairo = "0.21"
@@ -61,3 +62,8 @@ opt-level = 2
 opt-level = 2
 [profile.dev.package.underweb-app]
 opt-level = 2
+
+# release archives (`cargo xtask dist`)
+[profile.dist-release]
+inherits = "release"
+strip = "debuginfo"

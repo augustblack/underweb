@@ -16,3 +16,6 @@ file = "dist/x86_64-unknown-linux-gnu/libdemo_08_draw.so"
 
 [targets.aarch64-unknown-linux-gnu]
 file = "dist/aarch64-unknown-linux-gnu/libdemo_08_draw.so"
+
+[targets.x86_64-pc-windows-msvc]
+file = "dist/x86_64-pc-windows-msvc/demo_08_draw.dll"

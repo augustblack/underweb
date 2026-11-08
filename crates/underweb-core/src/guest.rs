@@ -1,5 +1,4 @@
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
 use std::sync::mpsc::{self, Receiver};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -103,7 +102,7 @@ struct Buffers {
 pub struct Guest {
     pub package: Package,
     chan: Arc<Channel>,
-    child: Child,
+    child: underweb_sandbox::Process,
     buffers: Arc<Mutex<Option<Buffers>>>,
     generation: u32,
     events: Receiver<GuestEvent>,
@@ -131,7 +130,7 @@ impl Sound {
         let mut src = self.source.lock().unwrap();
         if src.is_none() {
             let ring = AudioRing::create(RING_FRAMES)?;
-            let fd = ring.shm().raw_fd();
+            let fd = ring.shm().raw_handle();
             let s = self.mixer.add(ring);
             s.set_gain(if self.muted.load(std::sync::atomic::Ordering::Relaxed) {
                 0.0
@@ -192,18 +191,25 @@ impl Guest {
         std::fs::create_dir_all(&data).with_context(|| format!("creating {}", data.display()))?;
 
         let (host_end, guest_end) = Channel::pair()?;
-        let fd = guest_end.inheritable_fd()?;
         let runner = runner_path();
-        let mut cmd = Command::new(&runner);
-        cmd.arg("--ipc-fd")
-            .arg(fd.to_string())
-            .arg("--package")
+        let mut cmd = crate::spawn::with_channel(&runner, &guest_end)?;
+        cmd.arg("--package")
             .arg(&package.dir)
             .arg("--data")
-            .arg(&data)
-            .env_clear()
-            .stdin(Stdio::null());
-        if !opts.sandbox {
+            .arg(&data);
+        if opts.sandbox {
+            // Windows applies this at creation; elsewhere the runner
+            // locks itself down with the same policy
+            cmd.container = Some(underweb_sandbox::Container {
+                name: package.name().to_string(),
+                policy: underweb_sandbox::Policy {
+                    read_only: vec![package.dir.clone()],
+                    read_write: vec![data.clone()],
+                    allow_exec: false,
+                },
+                capabilities: vec![],
+            });
+        } else {
             cmd.arg("--no-sandbox");
         }
         for (k, v) in &opts.params {
@@ -214,8 +220,7 @@ impl Guest {
             .clone()
             .unwrap_or_else(crate::audio::default_mixer);
         cmd.arg("--audio-rate").arg(mixer.rate.to_string());
-        let child = cmd
-            .spawn()
+        let child = crate::spawn::start(&cmd, &host_end)
             .with_context(|| format!("starting {}", runner.display()))?;
         drop(guest_end);
 
@@ -295,7 +300,7 @@ impl Guest {
         let shm = Shm::create(stride as usize * height as usize * 2)?;
         self.generation += 1;
         let generation = self.generation;
-        let fd = shm.raw_fd();
+        let fd = shm.raw_handle();
         *self.buffers.lock().unwrap() = Some(Buffers {
             generation,
             width,

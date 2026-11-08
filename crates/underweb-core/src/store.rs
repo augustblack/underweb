@@ -8,7 +8,6 @@
 
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
@@ -62,12 +61,15 @@ pub struct Store {
 
 impl Store {
     /// The per-user cache: `~/Library/Caches/underweb` on macOS,
+    /// `%LOCALAPPDATA%\underweb\cache` on Windows,
     /// `$XDG_CACHE_HOME/underweb` or `~/.cache/underweb` elsewhere.
     pub fn default_root() -> PathBuf {
-        let home = std::env::var_os("HOME")
-            .map(PathBuf::from)
-            .unwrap_or_else(std::env::temp_dir);
-        if cfg!(target_os = "macos") {
+        let home = crate::paths::home();
+        if cfg!(windows) {
+            crate::paths::local_app_data()
+                .join("underweb")
+                .join("cache")
+        } else if cfg!(target_os = "macos") {
             home.join("Library/Caches/underweb")
         } else if let Some(x) = std::env::var_os("XDG_CACHE_HOME") {
             PathBuf::from(x).join("underweb")
@@ -84,6 +86,7 @@ impl Store {
             .into();
         let sdk = std::env::var_os("UNDERWEB_SDK")
             .map(PathBuf::from)
+            .or_else(installed_sdk)
             .unwrap_or_else(|| {
                 Path::new(env!("CARGO_MANIFEST_DIR"))
                     .join("../..")
@@ -276,7 +279,7 @@ impl Store {
         }
         let work = self.root.join("build").join(pkg.dir.file_name().unwrap());
         std::fs::create_dir_all(work.join("tmp"))?;
-        let mut cmd = Command::new(crate::runner_path());
+        let mut cmd = underweb_sandbox::Launch::new(crate::runner_path());
         cmd.arg("--build")
             .arg("--package")
             .arg(&pkg.dir)
@@ -284,16 +287,22 @@ impl Store {
             .arg(&work)
             .arg("--sdk")
             .arg(&self.sdk)
-            .env_clear()
-            .env("HOME", &work)
-            .env("TMPDIR", work.join("tmp"))
-            .env("PATH", builder_path(&[]))
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::piped());
-        if let Ok(cc) = std::env::var("CC") {
-            cmd.env("CC", cc);
+            .env(HOME_VAR, &work)
+            .env(TMP_VAR, work.join("tmp"))
+            .env("PATH", builder_path(&[]));
+        cmd.pipe_stderr = true;
+        for k in passed_build_env() {
+            if let Some(v) = std::env::var_os(k) {
+                cmd.env(k, v);
+            }
         }
+        // what the builder's own lockdown allows (see runner/src/build.rs);
+        // Windows needs it up front
+        let mut policy = underweb_sandbox::Policy {
+            read_only: vec![self.sdk.clone()],
+            read_write: vec![pkg.dir.clone(), work.clone()],
+            allow_exec: true,
+        };
         if !self.sandbox {
             cmd.arg("--no-sandbox");
         }
@@ -304,13 +313,13 @@ impl Store {
             // dependencies are downloaded here, outside the sandbox;
             // `cargo fetch` runs no package code
             progress("fetching Rust dependencies");
-            let status = Command::new(&rust.cargo)
+            let status = std::process::Command::new(&rust.cargo)
                 .current_dir(&pkg.dir)
                 .arg("fetch")
                 .args(sdk_patch(&self.sdk))
                 .env("CARGO_HOME", &cargo_home)
                 .env("RUSTUP_HOME", &rust.rustup_home)
-                .stdout(Stdio::null())
+                .stdout(std::process::Stdio::null())
                 .status()?;
             if !status.success() {
                 bail!("cargo fetch failed");
@@ -324,6 +333,17 @@ impl Store {
                 .arg(&rust.bin)
                 .arg("--write")
                 .arg(&cargo_home);
+            policy
+                .read_only
+                .extend([rust.rustup_home.clone(), rust.bin.clone()]);
+            policy.read_write.push(cargo_home);
+        }
+        if self.sandbox {
+            cmd.container = Some(underweb_sandbox::Container {
+                name: format!("build:{}", pkg.name()),
+                policy,
+                capabilities: vec![],
+            });
         }
         progress(&format!(
             "building {} (sandboxed: {})",
@@ -332,7 +352,7 @@ impl Store {
         ));
         let mut child = cmd.spawn().context("starting the builder")?;
         let mut tail: Vec<String> = Vec::new();
-        for line in BufReader::new(child.stderr.take().unwrap()).lines() {
+        for line in BufReader::new(child.take_stderr().unwrap()).lines() {
             let line = line?;
             progress(&line);
             tail.push(line);
@@ -347,19 +367,79 @@ impl Store {
     }
 }
 
+/// The SDK shipped with an installed copy (`cargo xtask dist`), next to
+/// the running program: `Contents/Resources/sdk` in the macOS bundle,
+/// `share/underweb/sdk` elsewhere.
+fn installed_sdk() -> Option<PathBuf> {
+    let exe = std::env::current_exe().ok()?;
+    let bin = exe.parent()?;
+    [
+        bin.join("../Resources/sdk"),
+        bin.join("../share/underweb/sdk"),
+    ]
+    .into_iter()
+    .find(|d| d.join("crates/underweb/Cargo.toml").is_file())
+    .and_then(|d| d.canonicalize().ok())
+}
+
 /// PATH for the builder: the given directories, wherever `pkg-config`
 /// lives (Homebrew), and the system's. The sandbox decides what is
 /// actually readable.
 fn builder_path(first: &[PathBuf]) -> String {
     let mut dirs: Vec<PathBuf> = first.to_vec();
-    if let Some(d) = which("pkg-config").and_then(|p| p.parent().map(Path::to_path_buf)) {
-        dirs.push(d);
+    if cfg!(windows) {
+        // the compiler (cl.exe from a developer prompt, or clang) and
+        // Windows itself; most of it is under Program Files and readable
+        // by the sandbox already
+        for tool in ["cl.exe", "clang.exe", "pkg-config.exe", "cargo.exe"] {
+            if let Some(d) = which(tool).and_then(|p| p.parent().map(Path::to_path_buf)) {
+                dirs.push(d);
+            }
+        }
+        if let Some(root) = std::env::var_os("SystemRoot") {
+            dirs.push(PathBuf::from(&root).join("System32"));
+            dirs.push(PathBuf::from(root));
+        }
+    } else {
+        if let Some(d) = which("pkg-config").and_then(|p| p.parent().map(Path::to_path_buf)) {
+            dirs.push(d);
+        }
+        dirs.extend([PathBuf::from("/usr/bin"), PathBuf::from("/bin")]);
     }
-    dirs.extend([PathBuf::from("/usr/bin"), PathBuf::from("/bin")]);
     dirs.dedup();
     std::env::join_paths(dirs)
         .map(|p| p.to_string_lossy().into_owned())
         .unwrap_or_default()
+}
+
+#[cfg(windows)]
+const HOME_VAR: &str = "USERPROFILE";
+#[cfg(not(windows))]
+const HOME_VAR: &str = "HOME";
+#[cfg(windows)]
+const TMP_VAR: &str = "TMP";
+#[cfg(not(windows))]
+const TMP_VAR: &str = "TMPDIR";
+
+/// Compiler settings the builder keeps from our environment. On Windows
+/// these are what a Visual Studio developer prompt sets for `cl.exe` and
+/// `link.exe`.
+fn passed_build_env() -> &'static [&'static str] {
+    if cfg!(windows) {
+        &[
+            "CC",
+            "INCLUDE",
+            "LIB",
+            "LIBPATH",
+            "VCINSTALLDIR",
+            "VCToolsInstallDir",
+            "WindowsSdkDir",
+            "WindowsSDKVersion",
+            "PKG_CONFIG_PATH",
+        ]
+    } else {
+        &["CC"]
+    }
 }
 
 fn which(program: &str) -> Option<PathBuf> {
@@ -385,22 +465,27 @@ struct Toolchain {
 
 impl Toolchain {
     fn find() -> Result<Toolchain> {
-        let home = std::env::var_os("HOME")
-            .map(PathBuf::from)
-            .unwrap_or_default();
+        let home = crate::paths::home();
         let candidates = std::env::var_os("PATH")
             .map(|p| std::env::split_paths(&p).collect::<Vec<_>>())
             .unwrap_or_default()
             .into_iter()
-            .chain([home.join(".cargo/bin")]);
+            .chain([home.join(".cargo").join("bin")]);
+        let exe = if cfg!(windows) { "cargo.exe" } else { "cargo" };
         let cargo = candidates
-            .map(|d| d.join("cargo"))
+            .map(|d| d.join(exe))
             .find(|c| c.exists())
             .context("this package is built from Rust source, and Rust is not installed (see https://rustup.rs)")?;
         let rustup_home = std::env::var_os("RUSTUP_HOME")
             .map(PathBuf::from)
             .unwrap_or_else(|| home.join(".rustup"));
-        let bin = cargo.parent().unwrap().canonicalize()?;
+        let bin = cargo.parent().unwrap().to_path_buf();
+        // (Windows' canonical form, \\?\C:\..., makes a poor PATH entry)
+        let bin = if cfg!(windows) {
+            bin
+        } else {
+            bin.canonicalize()?
+        };
         Ok(Toolchain {
             cargo,
             bin,

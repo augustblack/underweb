@@ -4,11 +4,15 @@
 //!   into `examples/<pkg>/dist/<target>/`, where its manifest points.
 //! - `header`: regenerate `include/underweb.h` from `underweb-abi`.
 //! - `test`: `examples`, then `cargo test --workspace`.
+//! - `dist`: `examples`, then a release archive in `target/dist/` (see
+//!   dist.rs).
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use anyhow::{Context, Result, bail};
+
+mod dist;
 
 const NATIVE_RUST_EXAMPLES: &[&str] = &[
     "hello-rust",
@@ -25,6 +29,10 @@ fn main() -> Result<()> {
     match task.as_str() {
         "examples" => examples(),
         "header" => header(),
+        "dist" => {
+            examples()?;
+            dist::dist(&root(), &host_triple()?)
+        }
         "test" => {
             examples()?;
             let ok = Command::new(env!("CARGO"))
@@ -37,7 +45,7 @@ fn main() -> Result<()> {
             Ok(())
         }
         _ => {
-            eprintln!("usage: cargo xtask <examples|header|test>");
+            eprintln!("usage: cargo xtask <examples|header|test|dist>");
             std::process::exit(2)
         }
     }
@@ -105,17 +113,38 @@ fn examples() -> Result<()> {
         let lib = dylib_name(&e.replace('-', "_"));
         let dist = dir.join("dist").join(&triple);
         std::fs::create_dir_all(&dist)?;
-        let cc = std::env::var("CC").unwrap_or_else(|_| "cc".into());
-        let status = Command::new(&cc)
-            .args(["-shared", "-fPIC", "-Wall", "-O2", "-I"])
-            .arg(root.join("include"))
-            .arg(dir.join(format!("{}.c", e.replace('-', "_"))))
-            .arg("-o")
-            .arg(dist.join(&lib))
-            .status()
-            .with_context(|| format!("running {cc}"))?;
+        let src = dir.join(format!("{}.c", e.replace('-', "_")));
+        let out = dist.join(&lib);
+        let status = match std::env::var("CC") {
+            Err(_) if cfg!(windows) => {
+                let mut fe = std::ffi::OsString::from("/Fe:");
+                fe.push(&out);
+                let mut fo = std::ffi::OsString::from("/Fo");
+                fo.push(dist.as_os_str());
+                fo.push("\\");
+                Command::new("cl.exe")
+                    .args(["/nologo", "/LD", "/O2", "/W3", "/I"])
+                    .arg(root.join("include"))
+                    .arg(&src)
+                    .arg(fo)
+                    .arg(fe)
+                    .status()
+                    .context("running cl.exe (use a Visual Studio developer prompt)")?
+            }
+            cc => {
+                let cc = cc.unwrap_or_else(|_| "cc".into());
+                Command::new(&cc)
+                    .args(["-shared", "-fPIC", "-Wall", "-O2", "-I"])
+                    .arg(root.join("include"))
+                    .arg(&src)
+                    .arg("-o")
+                    .arg(&out)
+                    .status()
+                    .with_context(|| format!("running {cc}"))?
+            }
+        };
         if !status.success() {
-            bail!("{cc} failed for {e}");
+            bail!("compiling {e} failed");
         }
         println!("{e}: dist/{triple}/{lib}");
     }

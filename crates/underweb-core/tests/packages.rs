@@ -185,7 +185,9 @@ fn probe_targets(tag: &str) -> ProbeTargets {
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     ProbeTargets {
         secret: secret.to_string_lossy().into(),
-        home: std::env::var("HOME").unwrap(),
+        home: std::env::var("HOME")
+            .or_else(|_| std::env::var("USERPROFILE"))
+            .unwrap(),
         write_to: dir.join("escaped.txt").to_string_lossy().into(),
         port: listener.local_addr().unwrap().port().to_string(),
         _dir: dir,
@@ -211,10 +213,6 @@ fn run_probe_rust(sandbox: bool) -> Run {
 }
 
 #[test]
-#[cfg_attr(
-    not(any(target_os = "macos", target_os = "linux")),
-    ignore = "no sandbox on this OS yet"
-)]
 fn sandbox_blocks_native_package() {
     let r = run_probe_rust(true);
     eprintln!("{}", r.logs.join("\n"));

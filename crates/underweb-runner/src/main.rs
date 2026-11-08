@@ -1,7 +1,7 @@
 //! `underweb-runner`: one process per package.
 //!
 //! ```text
-//! underweb-runner --ipc-fd N --package DIR --data DIR [--no-sandbox] [--param k=v]...
+//! underweb-runner --ipc END --package DIR --data DIR [--no-sandbox] [--param k=v]...
 //! underweb-runner --build ...   (see build.rs)
 //! ```
 //!
@@ -27,7 +27,7 @@ use underweb_ipc::{Channel, GuestMsg, PROTOCOL_VERSION};
 use underweb_pkg::{Kind, Package};
 
 struct Args {
-    ipc_fd: i32,
+    ipc: String,
     package: PathBuf,
     data: PathBuf,
     sandbox: bool,
@@ -37,13 +37,13 @@ struct Args {
 
 fn parse_args() -> Result<Args> {
     let mut it = std::env::args().skip(1);
-    let (mut ipc_fd, mut package, mut data) = (None, None, None);
+    let (mut ipc, mut package, mut data) = (None, None, None);
     let mut sandbox = true;
     let mut params = Vec::new();
     let mut audio_rate = 0;
     while let Some(a) = it.next() {
         match a.as_str() {
-            "--ipc-fd" => ipc_fd = Some(it.next().context("--ipc-fd N")?.parse()?),
+            "--ipc" => ipc = Some(it.next().context("--ipc END")?),
             "--package" => package = Some(PathBuf::from(it.next().context("--package DIR")?)),
             "--data" => data = Some(PathBuf::from(it.next().context("--data DIR")?)),
             "--no-sandbox" => sandbox = false,
@@ -57,7 +57,7 @@ fn parse_args() -> Result<Args> {
         }
     }
     Ok(Args {
-        ipc_fd: ipc_fd.context("missing --ipc-fd")?,
+        ipc: ipc.context("missing --ipc")?,
         package: package.context("missing --package")?,
         data: data.context("missing --data")?,
         sandbox,
@@ -77,10 +77,10 @@ fn main() {
             std::process::exit(2);
         }
     };
-    let chan = match unsafe { Channel::from_raw_fd(args.ipc_fd) } {
+    let chan = match unsafe { Channel::from_arg(&args.ipc) } {
         Ok(c) => c,
         Err(e) => {
-            eprintln!("underweb-runner: bad ipc fd: {e:#}");
+            eprintln!("underweb-runner: bad --ipc: {e:#}");
             std::process::exit(2);
         }
     };

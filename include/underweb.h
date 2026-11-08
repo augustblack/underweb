@@ -261,17 +261,25 @@ typedef struct UwMediaEvent {
   const char *text;
 } UwMediaEvent;
 
+/* Marks what a package library exports (needed for a Windows DLL; a
+ * definition inherits it from these declarations). */
+#if defined(_WIN32)
+#define UW_EXPORT __declspec(dllexport)
+#else
+#define UW_EXPORT __attribute__((visibility("default")))
+#endif
+
 /* A native package exports these. Only uw_abi_version and uw_activate are
  * required. uw_draw gets a cairo_t* (include <cairo.h> to use it). */
-uint32_t uw_abi_version(void);
-void uw_activate(const UwHost *host);
-void uw_update(const UwHost *host, double dt);
-void uw_pointer(const UwHost *host, const UwPointerEvent *ev);
-void uw_draw(const UwHost *host, void *cr, double w, double h);
-void uw_deactivate(const UwHost *host);
-void uw_net(const UwHost *host, const UwNetEvent *ev);
-void uw_pd(const UwHost *host, const UwPdEvent *ev);
-void uw_media(const UwHost *host, const UwMediaEvent *ev);
+UW_EXPORT uint32_t uw_abi_version(void);
+UW_EXPORT void uw_activate(const UwHost *host);
+UW_EXPORT void uw_update(const UwHost *host, double dt);
+UW_EXPORT void uw_pointer(const UwHost *host, const UwPointerEvent *ev);
+UW_EXPORT void uw_draw(const UwHost *host, void *cr, double w, double h);
+UW_EXPORT void uw_deactivate(const UwHost *host);
+UW_EXPORT void uw_net(const UwHost *host, const UwNetEvent *ev);
+UW_EXPORT void uw_pd(const UwHost *host, const UwPdEvent *ev);
+UW_EXPORT void uw_media(const UwHost *host, const UwMediaEvent *ev);
 
 /* Convenience: call a host function with its context, e.g.
  *   UW(host, set_title, "hello");                                       */
