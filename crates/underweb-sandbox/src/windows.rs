@@ -73,13 +73,13 @@ use windows_sys::Win32::System::SystemServices::ACCESS_ALLOWED_ACE_TYPE;
 use windows_sys::Win32::System::Threading::GetCurrentThreadId;
 use windows_sys::Win32::System::Threading::{
     CREATE_NO_WINDOW, CREATE_SUSPENDED, CREATE_UNICODE_ENVIRONMENT, CreateProcessW,
-    DeleteProcThreadAttributeList, EXTENDED_STARTUPINFO_PRESENT, GetCurrentProcess,
-    GetExitCodeProcess, INFINITE, InitializeProcThreadAttributeList, OpenProcessToken,
-    PROC_THREAD_ATTRIBUTE_CHILD_PROCESS_POLICY, PROC_THREAD_ATTRIBUTE_HANDLE_LIST,
-    PROC_THREAD_ATTRIBUTE_SECURITY_CAPABILITIES, PROCESS_INFORMATION,
-    ProcessExtensionPointDisablePolicy, ProcessImageLoadPolicy, ProcessStrictHandleCheckPolicy,
-    ResumeThread, STARTF_USESTDHANDLES, STARTUPINFOEXW, SetProcessMitigationPolicy,
-    TerminateProcess, WaitForSingleObject,
+    DETACHED_PROCESS, DeleteProcThreadAttributeList, EXTENDED_STARTUPINFO_PRESENT,
+    GetCurrentProcess, GetExitCodeProcess, INFINITE, InitializeProcThreadAttributeList,
+    OpenProcessToken, PROC_THREAD_ATTRIBUTE_CHILD_PROCESS_POLICY,
+    PROC_THREAD_ATTRIBUTE_HANDLE_LIST, PROC_THREAD_ATTRIBUTE_SECURITY_CAPABILITIES,
+    PROCESS_INFORMATION, ProcessExtensionPointDisablePolicy, ProcessImageLoadPolicy,
+    ProcessStrictHandleCheckPolicy, ResumeThread, STARTF_USESTDHANDLES, STARTUPINFOEXW,
+    SetProcessMitigationPolicy, TerminateProcess, WaitForSingleObject,
 };
 use windows_sys::Win32::System::WindowsProgramming::PROCESS_CREATION_CHILD_PROCESS_RESTRICTED;
 
@@ -825,6 +825,14 @@ pub fn spawn(l: &Launch) -> Result<Process> {
     let app = wide(&l.program);
     let mut cmdline = command_line(l);
     let env = environment(l);
+    // A container gets no console at all (as in Chromium): starting the
+    // hidden console host for it fails in a service session (CI) with
+    // STATUS_DLL_INIT_FAILED. Its stderr is passed explicitly anyway.
+    let console = if container.is_some() {
+        DETACHED_PROCESS
+    } else {
+        CREATE_NO_WINDOW
+    };
     let mut pi: PROCESS_INFORMATION = unsafe { std::mem::zeroed() };
     let ok = unsafe {
         CreateProcessW(
@@ -833,10 +841,7 @@ pub fn spawn(l: &Launch) -> Result<Process> {
             std::ptr::null(),
             std::ptr::null(),
             (!inherit.is_empty()) as i32,
-            EXTENDED_STARTUPINFO_PRESENT
-                | CREATE_SUSPENDED
-                | CREATE_UNICODE_ENVIRONMENT
-                | CREATE_NO_WINDOW,
+            EXTENDED_STARTUPINFO_PRESENT | CREATE_SUSPENDED | CREATE_UNICODE_ENVIRONMENT | console,
             env.as_ptr().cast(),
             std::ptr::null(),
             &si.StartupInfo,
