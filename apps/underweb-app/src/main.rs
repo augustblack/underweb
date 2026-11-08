@@ -89,7 +89,8 @@ impl App {
         ui.horizontal(|ui| {
             let mut close = None;
             for (i, tab) in self.tabs.iter().enumerate() {
-                let label = format!("{} {}", tab.status.icon(), tab.label())
+                let sound = if tab.has_sound() { "🔊" } else { "" };
+                let label = format!("{} {} {sound}", tab.status.icon(), tab.label())
                     .trim()
                     .to_string();
                 if ui.selectable_label(i == self.active, label).clicked() {
@@ -126,6 +127,7 @@ impl App {
             let (text, color) = status.badge();
             ui.label(egui::RichText::new(text).color(color).strong())
                 .on_hover_text(status.describe());
+            self.tabs[self.active].sound_button(ui);
             self.tabs[self.active].trust_label(ui);
             let edit = ui.add(
                 egui::TextEdit::singleline(&mut self.address)
@@ -162,6 +164,12 @@ impl App {
             })
         });
         if let Some(image) = shot {
+            // snapshot runs are for checking: show what the pages said
+            for t in &self.tabs {
+                for l in &t.log {
+                    eprintln!("[{}] {l}", t.label());
+                }
+            }
             match write_png(&snap.path, &image) {
                 Ok(()) => println!("wrote snapshot to {}", snap.path.display()),
                 Err(e) => eprintln!("snapshot failed: {e:#}"),

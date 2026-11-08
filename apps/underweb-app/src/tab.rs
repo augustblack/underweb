@@ -346,6 +346,27 @@ impl Tab {
         });
     }
 
+    pub fn has_sound(&self) -> bool {
+        self.guest.as_ref().is_some_and(|g| g.has_sound())
+    }
+
+    /// A speaker that mutes the tab, shown while it makes sound.
+    pub fn sound_button(&mut self, ui: &mut egui::Ui) {
+        let Some(g) = &self.guest else { return };
+        if !g.has_sound() {
+            return;
+        }
+        let muted = g.is_muted();
+        let (icon, tip) = if muted {
+            ("🔇", "Unmute this tab")
+        } else {
+            ("🔊", "Mute this tab")
+        };
+        if ui.button(icon).on_hover_text(tip).clicked() {
+            g.set_muted(!muted);
+        }
+    }
+
     /// One line about who published and vouches for this package.
     pub fn trust_label(&self, ui: &mut egui::Ui) {
         let Some(v) = &self.verdict else { return };

@@ -7,6 +7,7 @@ members = [
     "examples/hello-rust",
     "examples/probe-rust",
     "examples/probe-net-rust",
+    "examples/probe-audio-rust",
 ]
 
 [workspace.package]
@@ -23,12 +24,13 @@ underweb-guest = { path = "crates/underweb-guest" }
 underweb-pkg = { path = "crates/underweb-pkg" }
 underweb-core = { path = "crates/underweb-core" }
 underweb-capi = { path = "crates/underweb-capi" }
+underweb-audio = { path = "crates/underweb-audio" }
 
 anyhow = "1"
 serde = { version = "1", features = ["derive"] }
 postcard = { version = "1", features = ["use-std"] }
 toml = "1"
-nix = { version = "0.31", features = ["socket", "uio", "mman", "fs"] }
+nix = { version = "0.31", features = ["socket", "uio", "mman", "fs", "poll"] }
 libc = "0.2"
 cairo-rs = { version = "0.21", features = ["png"] }
 pango = "0.21"

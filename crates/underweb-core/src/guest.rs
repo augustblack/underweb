@@ -5,6 +5,8 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use anyhow::{Context, Result};
+use underweb_audio::AudioRing;
+use underweb_audio::mixer::{Mixer, Source};
 use underweb_ipc::{Channel, GuestMsg, HostMsg, Shm, argb32_stride};
 use underweb_pkg::{Package, Permission};
 
@@ -30,6 +32,9 @@ pub struct SpawnOptions {
     /// `remember_grants: false` keeps them in memory.
     pub grants_dir: Option<PathBuf>,
     pub remember_grants: bool,
+    /// Where the package's sound goes; defaults to the sound card
+    /// ([`crate::default_mixer`]).
+    pub mixer: Option<Arc<Mixer>>,
 }
 
 impl Default for SpawnOptions {
@@ -43,6 +48,7 @@ impl Default for SpawnOptions {
             identity: None,
             grants_dir: None,
             remember_grants: true,
+            mixer: None,
         }
     }
 }
@@ -99,6 +105,47 @@ pub struct Guest {
     generation: u32,
     events: Receiver<GuestEvent>,
     broker: Arc<Broker>,
+    sound: Arc<Sound>,
+}
+
+/// The package's place in the mixer.
+struct Sound {
+    mixer: Arc<Mixer>,
+    source: Mutex<Option<Arc<Source>>>,
+    muted: std::sync::atomic::AtomicBool,
+}
+
+/// Frames queued between the package and the sound card, at most.
+const RING_FRAMES: usize = 8192;
+
+impl Sound {
+    fn start(&self, chan: &Channel) -> Result<()> {
+        let mut src = self.source.lock().unwrap();
+        if src.is_none() {
+            let ring = AudioRing::create(RING_FRAMES)?;
+            let fd = ring.shm().raw_fd();
+            let s = self.mixer.add(ring);
+            s.set_gain(if self.muted.load(std::sync::atomic::Ordering::Relaxed) {
+                0.0
+            } else {
+                1.0
+            });
+            chan.send(
+                &HostMsg::AudioReady {
+                    capacity: RING_FRAMES as u32,
+                },
+                Some(fd),
+            )?;
+            *src = Some(s);
+        }
+        Ok(())
+    }
+
+    fn stop(&self) {
+        if let Some(s) = self.source.lock().unwrap().take() {
+            self.mixer.remove(s.id);
+        }
+    }
 }
 
 impl Guest {
@@ -128,6 +175,11 @@ impl Guest {
         for (k, v) in &opts.params {
             cmd.arg("--param").arg(format!("{k}={v}"));
         }
+        let mixer = opts
+            .mixer
+            .clone()
+            .unwrap_or_else(crate::audio::default_mixer);
+        cmd.arg("--audio-rate").arg(mixer.rate.to_string());
         let child = cmd
             .spawn()
             .with_context(|| format!("starting {}", runner.display()))?;
@@ -151,14 +203,20 @@ impl Guest {
             tx.clone(),
             opts.wake.clone(),
         );
+        let sound = Arc::new(Sound {
+            mixer,
+            source: Mutex::new(None),
+            muted: Default::default(),
+        });
         {
             let chan = chan.clone();
             let buffers = buffers.clone();
             let wake = opts.wake.clone();
             let broker = broker.clone();
+            let sound = sound.clone();
             std::thread::Builder::new()
                 .name(format!("guest {}", package.name()))
-                .spawn(move || read_loop(&chan, &buffers, &broker, &tx, wake.as_deref()))?;
+                .spawn(move || read_loop(&chan, &buffers, &broker, &sound, &tx, wake.as_deref()))?;
         }
         Ok(Guest {
             package,
@@ -168,6 +226,7 @@ impl Guest {
             generation: 0,
             events,
             broker,
+            sound,
         })
     }
 
@@ -217,6 +276,35 @@ impl Guest {
         self.events.recv_timeout(timeout).ok()
     }
 
+    /// Silence (or unsilence) this package.
+    pub fn set_muted(&self, muted: bool) {
+        self.sound
+            .muted
+            .store(muted, std::sync::atomic::Ordering::Relaxed);
+        if let Some(s) = self.sound.source.lock().unwrap().as_ref() {
+            s.set_gain(if muted { 0.0 } else { 1.0 });
+        }
+    }
+
+    pub fn is_muted(&self) -> bool {
+        self.sound.muted.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Frames of this package's sound the output has consumed so far.
+    pub fn frames_played(&self) -> u64 {
+        self.sound
+            .source
+            .lock()
+            .unwrap()
+            .as_ref()
+            .map_or(0, |s| s.played.load(std::sync::atomic::Ordering::Relaxed))
+    }
+
+    /// Whether the package has asked for sound (and not stopped).
+    pub fn has_sound(&self) -> bool {
+        self.sound.source.lock().unwrap().is_some()
+    }
+
     /// Answer a [`GuestEvent::PermissionRequest`].
     pub fn answer(&self, id: u64, decision: Decision) {
         self.broker.answer(id, decision)
@@ -235,6 +323,7 @@ impl Guest {
 
     pub fn shutdown(mut self) {
         self.broker.close_all();
+        self.sound.stop();
         let _ = self.chan.send(&HostMsg::Shutdown, None);
         for _ in 0..50 {
             if let Ok(Some(_)) = self.child.try_wait() {
@@ -250,6 +339,7 @@ impl Guest {
 impl Drop for Guest {
     fn drop(&mut self) {
         self.broker.close_all();
+        self.sound.stop();
         if let Ok(None) = self.child.try_wait() {
             let _ = self.chan.send(&HostMsg::Shutdown, None);
             std::thread::sleep(Duration::from_millis(20));
@@ -263,6 +353,7 @@ fn read_loop(
     chan: &Channel,
     buffers: &Mutex<Option<Buffers>>,
     broker: &Arc<Broker>,
+    sound: &Sound,
     tx: &mpsc::Sender<GuestEvent>,
     wake: Option<&(dyn Fn() + Send + Sync)>,
 ) {
@@ -288,6 +379,12 @@ fn read_loop(
             GuestMsg::Log(l) => send(GuestEvent::Log(l)),
             GuestMsg::Error(e) => send(GuestEvent::Error(e)),
             GuestMsg::Net { handle, op } => broker.request(handle, op),
+            GuestMsg::AudioStart => {
+                if let Err(e) = sound.start(chan) {
+                    send(GuestEvent::Log(format!("no sound: {e:#}")));
+                }
+            }
+            GuestMsg::AudioStop => sound.stop(),
             GuestMsg::Frame { generation, index } => {
                 let frame = {
                     let guard = buffers.lock().unwrap();
@@ -308,6 +405,7 @@ fn read_loop(
     // the reader can't wait() on the child; report the socket closing and
     // let the owner collect the status
     broker.close_all();
+    sound.stop();
     send(GuestEvent::Exited(None));
 }
 

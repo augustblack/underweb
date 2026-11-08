@@ -8,7 +8,7 @@ sandboxed process.
 This is a Rust rewrite of the 2011 Vala project. See
 [docs/ROADMAP.md](docs/ROADMAP.md) for the design and phases.
 
-## Status: phases 0–4
+## Status: phases 0–4 and 6
 
 Working on macOS:
 
@@ -54,12 +54,12 @@ site serving its index.
 
 ## Build and run
 
-Needs Rust ≥ 1.91 and cairo and pango:
+Needs Rust ≥ 1.91, cairo, pango, and cmake (to build libpd):
 
 ```sh
-brew install cairo pango pkgconf                         # macOS
-sudo apt install libcairo2-dev libpango1.0-dev pkg-config \
-  libxkbcommon-dev libwayland-dev                         # Debian/Ubuntu
+brew install cairo pango pkgconf cmake                   # macOS
+sudo apt install libcairo2-dev libpango1.0-dev pkg-config cmake clang \
+  libclang-dev libasound2-dev libxkbcommon-dev libwayland-dev   # Debian/Ubuntu
 
 cargo xtask examples          # builds the runner and the native example packages
 cargo run -p underweb-app -- hello-js hello-ts hello-rust hello-c
@@ -162,6 +162,21 @@ const r = await net.fetch("https://api.example.org/v1/items");
 storage.set("last", await r.text());
 ```
 
+Sound needs no permission:
+
+```ts
+import { audio } from "underweb";
+const osc = audio.osc("square", { freq: 220, amp: 0.2, pan: 0 });
+osc.freq = 330;                    // smoothed, no clicks
+audio.pd.open("synth.pd");         // a patch in the package
+audio.pd.send("freq", 440);        // to [r freq]
+audio.pd.subscribe("beat");        // from [s beat]
+audio.pd.onmessage = (receiver, value) => { /* … */ };
+const samples = audio.scope(512);  // what's playing, for drawing
+```
+
+`examples/hello-audio` and `examples/hello-pd` are the 2011 audio and Pure
+Data demos, ported (hello-pd uses the original `440.pd`).
 `examples/hello-net` asks to fetch from GitHub. `--allow-declared` grants
 declared permissions without asking (development).
 
@@ -183,6 +198,7 @@ See `examples/` for the same idea in Rust (the `underweb` crate and
 | `crates/underweb-pkg` | `underweb.toml`, archives, release indexes, addresses, publishing |
 | `crates/underweb-cli` | `uw`, the authoring tool |
 | `crates/underweb-capi` | the engine as a C library |
+| `crates/underweb-audio` | the audio ring, oscillators, the engine with Pure Data, and the browser's mixer |
 | `crates/underweb-trust` | signed statements, keys, the trust store and policy, signed lists |
 | `crates/underweb-trust-atproto` | Bluesky/ATProto: identities, keys, statements, follows |
 | `sdk/js` | TypeScript types for JS/TS packages |

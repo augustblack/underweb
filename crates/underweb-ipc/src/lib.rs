@@ -49,6 +49,11 @@ pub enum HostMsg {
     },
     /// Network: a reply or incoming data for a handle.
     Net(NetEvent),
+    /// Answer to `GuestMsg::AudioStart`: carries the shared-memory audio
+    /// ring (`capacity` stereo frames) the browser plays from.
+    AudioReady {
+        capacity: u32,
+    },
     /// The host is done with a frame buffer.
     Release {
         generation: u32,
@@ -81,6 +86,9 @@ pub enum GuestMsg {
         handle: u32,
         op: NetOp,
     },
+    /// The package wants to make sound.
+    AudioStart,
+    AudioStop,
 }
 
 /// What a package asks the host to do. The host checks each against the

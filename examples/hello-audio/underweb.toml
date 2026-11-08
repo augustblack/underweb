@@ -1,0 +1,6 @@
+[package]
+name = "hello-audio"
+version = "0.1.0"
+kind = "ts"
+entry = "main.ts"
+description = "demos/11audio, ported: a band-limited square wave that follows the mouse, with a scope."

@@ -189,6 +189,60 @@ const storage = {
   keys: () => ops.op_uw_storage_keys(),
 };
 
+// ---- audio ----------------------------------------------------------------
+// Sound is rendered in this package's process, off the page's thread, and
+// played by the browser. Oscillators and Pure Data patches are controlled
+// from here; nothing here runs per sample.
+
+class Osc {
+  #f; #a; #p;
+  constructor(wave = "sine", { freq = 440, amp = 0.2, pan = 0 } = {}) {
+    this.#f = freq; this.#a = amp; this.#p = pan;
+    this.id = ops.op_uw_osc_new(wave, freq, amp, pan);
+  }
+  #set() { ops.op_uw_osc_set(this.id, this.#f, this.#a, this.#p); }
+  get freq() { return this.#f; }
+  set freq(v) { this.#f = v; this.#set(); }
+  get amp() { return this.#a; }
+  set amp(v) { this.#a = v; this.#set(); }
+  get pan() { return this.#p; }
+  set pan(v) { this.#p = v; this.#set(); }
+  stop() { ops.op_uw_osc_free(this.id); }
+}
+
+const pd = {
+  /** Open a patch shipped with the package; starts sound. */
+  open(path) { ops.op_uw_pd_open(String(path)); },
+  /** Send to [r receiver]: a number, a string, an array, or nothing (bang). */
+  send(receiver, value = null) { ops.op_uw_pd_send(String(receiver), value ?? null); },
+  bang(receiver) { ops.op_uw_pd_send(String(receiver), null); },
+  /** Get what Pd sends to [s receiver] in onmessage. */
+  subscribe(receiver) { ops.op_uw_pd_subscribe(String(receiver)); },
+  onmessage: null, // (receiver, value) => void
+};
+
+const audio = {
+  /** The browser's sample rate (0: no audio). */
+  get rate() { return ops.op_uw_audio_rate(); },
+  start() { ops.op_uw_audio_start(); },
+  stop() { ops.op_uw_audio_stop(); },
+  set volume(v) { ops.op_uw_audio_volume(v); },
+  /** "sine" | "saw" | "square" | "triangle" | "noise" */
+  osc(wave, opts) { return new Osc(wave, opts); },
+  /** The last `frames` frames played, mono, for drawing. */
+  scope(frames = 512) {
+    const b = ops.op_uw_audio_scope(frames);
+    return new Float32Array(b.buffer, b.byteOffset, b.byteLength / 4);
+  },
+  pd,
+};
+
+function pdMessages() {
+  for (const [receiver, value] of ops.op_uw_pd_next()) {
+    pd.onmessage?.(receiver, value);
+  }
+}
+
 globalThis.console = {
   log: window.log,
   info: window.log,
@@ -214,7 +268,7 @@ core.setUnhandledPromiseRejectionHandler((_promise, reason) => {
   return true;
 });
 
-const api = { Layout, Shape, window, net, storage, dispatch, netEvents };
+const api = { Layout, Shape, window, net, storage, audio, dispatch, netEvents, pdMessages };
 Object.defineProperty(globalThis, "__uw", { value: api });
 
 // Packages get no Deno internals: only the API above.

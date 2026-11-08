@@ -4,8 +4,12 @@ use std::cell::RefCell;
 
 use anyhow::{Context, Result};
 use underweb_abi::UwPointerEvent;
+use underweb_audio::pd::PdMessage;
+use underweb_audio::{AudioRing, pd};
 use underweb_guest::{Scene, cairo};
 use underweb_ipc::{Channel, GuestMsg, HostMsg, NetEvent, Shm};
+
+use crate::audio::Audio;
 
 /// A loaded package, whatever language it is written in.
 pub trait Page {
@@ -14,6 +18,8 @@ pub trait Page {
     fn pointer(&mut self, ev: &UwPointerEvent) -> Result<()>;
     /// A network event for one of the package's handles.
     fn net(&mut self, ev: NetEvent) -> Result<()>;
+    /// Messages Pd sent to receivers the page subscribed to.
+    fn pd(&mut self, msgs: Vec<PdMessage>) -> Result<()>;
     /// Raw cairo drawing on top of the scene (native packages only).
     fn draw(&mut self, _cr: &cairo::Context, _w: f64, _h: f64) {}
     fn deactivate(&mut self) {}
@@ -29,7 +35,12 @@ struct Frames {
     free: [bool; 2],
 }
 
-pub fn run(chan: &Channel, scene: &RefCell<Scene>, page: &mut dyn Page) -> Result<()> {
+pub fn run(
+    chan: &Channel,
+    scene: &RefCell<Scene>,
+    page: &mut dyn Page,
+    audio: &Audio,
+) -> Result<()> {
     page.activate().context("activate")?;
     let mut frames: Option<Frames> = None;
     let mut title = String::new();
@@ -49,6 +60,20 @@ pub fn run(chan: &Channel, scene: &RefCell<Scene>, page: &mut dyn Page) -> Resul
             }
         }
         draw_if_needed(chan, scene, page, frames.as_mut())?;
+
+        // while sound runs, look for Pd's messages every 20 ms
+        let msgs = if pd::is_started() {
+            pd::take_messages()
+        } else {
+            Vec::new()
+        };
+        if !msgs.is_empty() {
+            page.pd(msgs).context("pd")?;
+            continue;
+        }
+        if audio.active() && !chan.readable(20)? {
+            continue;
+        }
 
         let Some((msg, fd)) = chan.recv::<HostMsg>()? else {
             break;
@@ -95,10 +120,16 @@ pub fn run(chan: &Channel, scene: &RefCell<Scene>, page: &mut dyn Page) -> Resul
                 }
             }
             HostMsg::Net(ev) => page.net(ev).context("net")?,
+            HostMsg::AudioReady { capacity } => {
+                let fd = fd.context("AudioReady without a ring")?;
+                let shm = Shm::from_fd(fd, AudioRing::bytes_for(capacity as usize))?;
+                audio.attach(AudioRing::open(shm)?);
+            }
             HostMsg::Shutdown => break,
         }
     }
     page.deactivate();
+    audio.stop();
     Ok(())
 }
 

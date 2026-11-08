@@ -58,6 +58,15 @@ impl Channel {
         Ok(self.fd.as_raw_fd())
     }
 
+    /// Wait up to `timeout_ms` for something to read.
+    pub fn readable(&self, timeout_ms: u16) -> Result<bool> {
+        use nix::poll::{PollFd, PollFlags, PollTimeout, poll};
+        use std::os::fd::AsFd;
+        let mut fds = [PollFd::new(self.fd.as_fd(), PollFlags::POLLIN)];
+        let n = poll(&mut fds, PollTimeout::from(timeout_ms)).context("poll")?;
+        Ok(n > 0)
+    }
+
     pub fn send<T: Serialize>(&self, msg: &T, fd: Option<RawFd>) -> Result<()> {
         let body = postcard::to_stdvec(msg)?;
         let len = (body.len() as u32).to_le_bytes();

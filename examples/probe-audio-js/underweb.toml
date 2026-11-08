@@ -1,0 +1,6 @@
+[package]
+name = "probe-audio-js"
+version = "0.1.0"
+kind = "js"
+entry = "main.js"
+description = "Audio test: ?osc=HZ plays an oscillator; ?pd=HZ plays tone.pd and echoes ping->pong."

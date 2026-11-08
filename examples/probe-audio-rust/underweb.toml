@@ -1,0 +1,18 @@
+[package]
+name = "probe-audio-rust"
+version = "0.1.0"
+kind = "rust"
+description = "Audio test for native packages: ?freq=HZ plays a sine from its own callback."
+
+[targets.aarch64-apple-darwin]
+file = "dist/aarch64-apple-darwin/libprobe_audio_rust.dylib"
+
+[targets.x86_64-apple-darwin]
+file = "dist/x86_64-apple-darwin/libprobe_audio_rust.dylib"
+
+[targets.x86_64-unknown-linux-gnu]
+file = "dist/x86_64-unknown-linux-gnu/libprobe_audio_rust.so"
+
+[targets.aarch64-unknown-linux-gnu]
+file = "dist/aarch64-unknown-linux-gnu/libprobe_audio_rust.so"
+

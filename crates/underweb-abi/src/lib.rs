@@ -10,6 +10,7 @@
 //! void uw_draw(const UwHost *host, cairo_t *cr, double w, double h); // optional, raw cairo
 //! void uw_deactivate(const UwHost *host);                // optional
 //! void uw_net(const UwHost *host, const UwNetEvent *ev); // optional, ABI 2
+//! void uw_pd(const UwHost *host, const UwPdEvent *ev);   // optional, ABI 3
 //! ```
 //!
 //! Everything the package can do goes through the function table in
@@ -20,8 +21,9 @@
 use std::ffi::{c_char, c_void};
 
 /// The ABI this header describes. Version 2 appended network and storage
-/// functions to [`UwHost`]; packages built for version 1 still load.
-pub const UW_ABI_VERSION: u32 = 2;
+/// functions to [`UwHost`], version 3 audio; packages built for older
+/// versions still load.
+pub const UW_ABI_VERSION: u32 = 3;
 /// The oldest ABI the runner still accepts.
 pub const UW_ABI_MIN_VERSION: u32 = 1;
 
@@ -56,6 +58,38 @@ pub struct UwNetEvent {
     pub len: usize,
     pub text: *const c_char,
 }
+
+/// Oscillator waves for `osc_new`.
+pub const UW_WAVE_SINE: u32 = 0;
+pub const UW_WAVE_SAW: u32 = 1;
+pub const UW_WAVE_SQUARE: u32 = 2;
+pub const UW_WAVE_TRIANGLE: u32 = 3;
+pub const UW_WAVE_NOISE: u32 = 4;
+
+/// [`UwPdEvent::kind`]
+pub const UW_PD_BANG: u32 = 0;
+pub const UW_PD_FLOAT: u32 = 1;
+pub const UW_PD_SYMBOL: u32 = 2;
+/// The floats of a list (symbols in it are left out).
+pub const UW_PD_LIST: u32 = 3;
+
+/// Something Pd sent to a receiver the package subscribed to. Pointers
+/// are valid only during the `uw_pd` call.
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct UwPdEvent {
+    pub receiver: *const c_char,
+    pub kind: u32,
+    pub value: f32,
+    pub symbol: *const c_char,
+    pub list: *const f32,
+    pub len: usize,
+}
+
+/// Your own audio, on the audio thread: add to `count` interleaved frames
+/// of `channels` (2) channels in `frames`. Must not block or allocate.
+pub type UwAudioFn =
+    extern "C" fn(user: *mut c_void, frames: *mut f32, count: usize, channels: u32);
 
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
@@ -153,6 +187,33 @@ pub struct UwHost {
         body: *const u8,
         len: usize,
     ) -> u32,
+
+    // ---- ABI 3: audio ----
+    /// The browser's sample rate; 0 if it has no audio.
+    pub audio_rate: extern "C" fn(ctx: *mut c_void) -> u32,
+    /// Start sound (oscillators, Pd and `audio_callback` start it too).
+    pub audio_start: extern "C" fn(ctx: *mut c_void) -> bool,
+    pub audio_stop: extern "C" fn(ctx: *mut c_void),
+    pub audio_volume: extern "C" fn(ctx: *mut c_void, volume: f32),
+    /// `wave` is a `UW_WAVE_*`; `pan` from -1 (left) to 1. Returns 0 if
+    /// none is free.
+    pub osc_new: extern "C" fn(ctx: *mut c_void, wave: u32, freq: f32, amp: f32, pan: f32) -> u32,
+    pub osc_set: extern "C" fn(ctx: *mut c_void, id: u32, freq: f32, amp: f32, pan: f32),
+    pub osc_free: extern "C" fn(ctx: *mut c_void, id: u32),
+    /// Copy up to `count` of the latest frames played (mono) to `out`.
+    pub audio_scope: extern "C" fn(ctx: *mut c_void, out: *mut f32, count: usize) -> usize,
+    /// Mix your own audio in; `None` removes it.
+    pub audio_callback:
+        extern "C" fn(ctx: *mut c_void, callback: Option<UwAudioFn>, user: *mut c_void),
+    /// Open a Pd patch from the package (relative path); starts sound.
+    pub pd_open: extern "C" fn(ctx: *mut c_void, path: *const c_char) -> bool,
+    pub pd_bang: extern "C" fn(ctx: *mut c_void, receiver: *const c_char),
+    pub pd_float: extern "C" fn(ctx: *mut c_void, receiver: *const c_char, value: f32),
+    pub pd_symbol: extern "C" fn(ctx: *mut c_void, receiver: *const c_char, symbol: *const c_char),
+    pub pd_list:
+        extern "C" fn(ctx: *mut c_void, receiver: *const c_char, values: *const f32, count: usize),
+    /// Receive what Pd sends to `[s receiver]` in `uw_pd`.
+    pub pd_subscribe: extern "C" fn(ctx: *mut c_void, receiver: *const c_char),
 }
 
 pub type UwAbiVersionFn = unsafe extern "C" fn() -> u32;
@@ -163,3 +224,4 @@ pub type UwPointerFn = unsafe extern "C" fn(host: *const UwHost, ev: *const UwPo
 pub type UwDrawFn = unsafe extern "C" fn(host: *const UwHost, cr: *mut c_void, w: f64, h: f64);
 pub type UwDeactivateFn = unsafe extern "C" fn(host: *const UwHost);
 pub type UwNetFn = unsafe extern "C" fn(host: *const UwHost, ev: *const UwNetEvent);
+pub type UwPdFn = unsafe extern "C" fn(host: *const UwHost, ev: *const UwPdEvent);

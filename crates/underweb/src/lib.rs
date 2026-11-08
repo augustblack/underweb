@@ -105,6 +105,164 @@ fn host_v2() -> &'static UwHost {
     h
 }
 
+fn host_v3() -> &'static UwHost {
+    let h = host();
+    assert!(
+        h.abi_version >= 3,
+        "this browser is too old for audio functions"
+    );
+    h
+}
+
+/// Sound, rendered in the package's process off the page's thread and
+/// played by the browser.
+pub mod audio {
+    use std::ffi::c_void;
+    use std::sync::Mutex;
+
+    use super::host_v3;
+
+    /// The browser's sample rate; 0 without audio.
+    pub fn rate() -> u32 {
+        let h = host_v3();
+        (h.audio_rate)(h.ctx)
+    }
+    pub fn start() -> bool {
+        let h = host_v3();
+        (h.audio_start)(h.ctx)
+    }
+    pub fn stop() {
+        let h = host_v3();
+        (h.audio_stop)(h.ctx)
+    }
+    pub fn set_volume(v: f32) {
+        let h = host_v3();
+        (h.audio_volume)(h.ctx, v)
+    }
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub enum Wave {
+        Sine = 0,
+        Saw = 1,
+        Square = 2,
+        Triangle = 3,
+        Noise = 4,
+    }
+
+    /// An oscillator; stops when dropped.
+    pub struct Osc(u32);
+
+    impl Osc {
+        /// `pan` from -1 (left) to 1 (right). None if all are in use.
+        pub fn new(wave: Wave, freq: f32, amp: f32, pan: f32) -> Option<Osc> {
+            let h = host_v3();
+            let id = (h.osc_new)(h.ctx, wave as u32, freq, amp, pan);
+            (id != 0).then_some(Osc(id))
+        }
+        pub fn set(&self, freq: f32, amp: f32, pan: f32) {
+            let h = host_v3();
+            (h.osc_set)(h.ctx, self.0, freq, amp, pan)
+        }
+    }
+
+    impl Drop for Osc {
+        fn drop(&mut self) {
+            let h = host_v3();
+            (h.osc_free)(h.ctx, self.0)
+        }
+    }
+
+    /// The latest `frames` frames played, mono.
+    pub fn scope(frames: usize) -> Vec<f32> {
+        let h = host_v3();
+        let mut v = vec![0f32; frames];
+        let n = (h.audio_scope)(h.ctx, v.as_mut_ptr(), frames);
+        v.truncate(n);
+        v
+    }
+
+    type Boxed = Box<dyn FnMut(&mut [f32]) + Send>;
+    static CURRENT: Mutex<Option<usize>> = Mutex::new(None);
+
+    extern "C" fn trampoline(user: *mut c_void, frames: *mut f32, count: usize, channels: u32) {
+        let f = unsafe { &mut *(user as *mut Boxed) };
+        let buf = unsafe { std::slice::from_raw_parts_mut(frames, count * channels as usize) };
+        f(buf);
+    }
+
+    /// Your own sound: `f` adds to interleaved stereo frames, on the audio
+    /// thread. It must not block (no locks, no I/O, no allocation).
+    pub fn set_callback(f: impl FnMut(&mut [f32]) + Send + 'static) {
+        let boxed: Box<Boxed> = Box::new(Box::new(f));
+        let user = Box::into_raw(boxed);
+        let h = host_v3();
+        (h.audio_callback)(h.ctx, Some(trampoline), user as *mut c_void);
+        // the old one is no longer called once audio_callback returns
+        if let Some(old) = CURRENT.lock().unwrap().replace(user as usize) {
+            drop(unsafe { Box::from_raw(old as *mut Boxed) });
+        }
+    }
+
+    pub fn clear_callback() {
+        let h = host_v3();
+        (h.audio_callback)(h.ctx, None, std::ptr::null_mut());
+        if let Some(old) = CURRENT.lock().unwrap().take() {
+            drop(unsafe { Box::from_raw(old as *mut Boxed) });
+        }
+    }
+}
+
+/// Pure Data patches shipped with the package.
+pub mod pd {
+    use super::{cstring, host_v3};
+
+    /// Open a patch (path relative to the package); starts sound.
+    pub fn open(path: &str) -> bool {
+        let h = host_v3();
+        (h.pd_open)(h.ctx, cstring(path).as_ptr())
+    }
+    pub fn bang(receiver: &str) {
+        let h = host_v3();
+        (h.pd_bang)(h.ctx, cstring(receiver).as_ptr())
+    }
+    pub fn float(receiver: &str, value: f32) {
+        let h = host_v3();
+        (h.pd_float)(h.ctx, cstring(receiver).as_ptr(), value)
+    }
+    pub fn symbol(receiver: &str, symbol: &str) {
+        let h = host_v3();
+        (h.pd_symbol)(h.ctx, cstring(receiver).as_ptr(), cstring(symbol).as_ptr())
+    }
+    pub fn list(receiver: &str, values: &[f32]) {
+        let h = host_v3();
+        (h.pd_list)(
+            h.ctx,
+            cstring(receiver).as_ptr(),
+            values.as_ptr(),
+            values.len(),
+        )
+    }
+    /// Get what Pd sends to `[s receiver]` in [`crate::Page::pd`].
+    pub fn subscribe(receiver: &str) {
+        let h = host_v3();
+        (h.pd_subscribe)(h.ctx, cstring(receiver).as_ptr())
+    }
+
+    #[derive(Debug, Clone, PartialEq)]
+    pub enum Value {
+        Bang,
+        Float(f32),
+        Symbol(String),
+        List(Vec<f32>),
+    }
+
+    #[derive(Debug, Clone)]
+    pub struct PdEvent {
+        pub receiver: String,
+        pub value: Value,
+    }
+}
+
 /// Networking through the browser. Every call returns a [`net::Handle`] at
 /// once; results arrive as [`net::NetEvent`]s in [`Page::net`]. Each needs a
 /// permission declared in underweb.toml and granted by the user.
@@ -281,6 +439,8 @@ pub trait Page: Default + 'static {
     fn pointer(&mut self, _window: &Window, _ev: &PointerEvent) {}
     /// A network event for a handle from [`net`].
     fn net(&mut self, _window: &Window, _ev: &net::NetEvent) {}
+    /// Something Pd sent to a receiver you subscribed to.
+    fn pd(&mut self, _window: &Window, _ev: &pd::PdEvent) {}
     /// Draw with raw cairo on top of the layouts, in logical pixels.
     #[cfg(feature = "cairo")]
     fn draw(&mut self, _window: &Window, _cr: &cairo::Context, _width: f64, _height: f64) {}
@@ -395,6 +555,32 @@ pub mod __private {
         with(slot, |p, w| p.net(w, &e));
     }
 
+    pub unsafe fn pd<P: Page>(slot: &'static Slot<P>, ev: *const underweb_abi::UwPdEvent) {
+        use underweb_abi::*;
+        let ev = unsafe { *ev };
+        let s = |p: *const std::ffi::c_char| {
+            if p.is_null() {
+                String::new()
+            } else {
+                unsafe { CStr::from_ptr(p) }.to_string_lossy().into_owned()
+            }
+        };
+        let value = match ev.kind {
+            UW_PD_FLOAT => pd::Value::Float(ev.value),
+            UW_PD_SYMBOL => pd::Value::Symbol(s(ev.symbol)),
+            UW_PD_LIST if !ev.list.is_null() => {
+                pd::Value::List(unsafe { std::slice::from_raw_parts(ev.list, ev.len) }.to_vec())
+            }
+            UW_PD_LIST => pd::Value::List(Vec::new()),
+            _ => pd::Value::Bang,
+        };
+        let e = pd::PdEvent {
+            receiver: s(ev.receiver),
+            value,
+        };
+        with(slot, |p, w| p.pd(w, &e));
+    }
+
     pub unsafe fn deactivate<P: Page>(slot: &'static Slot<P>) {
         with(slot, |p, w| p.deactivate(w));
         guard(|| slot.with(|p| *p.borrow_mut() = None));
@@ -434,6 +620,10 @@ macro_rules! export_page {
             ev: *const $crate::abi::UwNetEvent,
         ) {
             unsafe { $crate::__private::net::<$page>(&__UW_PAGE, ev) }
+        }
+        #[unsafe(no_mangle)]
+        pub unsafe extern "C" fn uw_pd(_host: *const $crate::abi::UwHost, ev: *const $crate::abi::UwPdEvent) {
+            unsafe { $crate::__private::pd::<$page>(&__UW_PAGE, ev) }
         }
         $crate::__export_draw!($page, __UW_PAGE);
         #[unsafe(no_mangle)]

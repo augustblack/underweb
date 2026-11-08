@@ -15,17 +15,20 @@
 //! [`Trust`] says who published an archive and who vouches for it, and
 //! decides whether declared permissions are granted without asking.
 
+mod audio;
 mod broker;
 mod guest;
 mod paths;
 mod store;
 mod trust;
 
+pub use audio::default_mixer;
 pub use broker::{Decision, GrantState, PermissionPolicy};
 pub use guest::{Frame, Guest, GuestEvent, SpawnOptions};
 pub use paths::{data_dir, runner_path};
 pub use store::{Origin, Resolved, Store, Subject};
 pub use trust::{DomainAdapter, Trust, sign_release};
 pub use underweb_abi::{UW_POINTER_MOVE, UW_POINTER_PRESS, UW_POINTER_RELEASE};
+pub use underweb_audio::mixer::Mixer;
 pub use underweb_pkg::{Kind, Package, Permission};
 pub use underweb_trust::{self as trust_types, Verdict};

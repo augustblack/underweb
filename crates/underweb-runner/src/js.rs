@@ -25,8 +25,11 @@ use underweb_guest::{PathOp, Rgba, Scene, Shape};
 use underweb_ipc::{Channel, GuestMsg, NetEvent, NetEventKind, NetOp};
 use underweb_pkg::Package;
 
+use crate::audio::Audio;
 use crate::net::Net;
 use crate::page::Page;
+use underweb_audio::pd::{self, PdMessage, PdValue};
+use underweb_audio::ugens::Wave;
 
 const API_SPECIFIER: &str = "underweb:api";
 const MAIN_SPECIFIER: &str = "underweb:main";
@@ -326,6 +329,124 @@ fn op_uw_storage_keys(state: &mut OpState) -> Vec<String> {
     keys
 }
 
+// ---- audio: oscillators and Pure Data, rendered off the main thread -----
+
+type SharedAudio = Rc<Audio>;
+
+fn audio(state: &OpState) -> &Audio {
+    state.borrow::<SharedAudio>()
+}
+
+fn js_err(e: anyhow::Error) -> JsErrorBox {
+    JsErrorBox::generic(format!("{e:#}"))
+}
+
+#[op2(fast)]
+fn op_uw_audio_rate(state: &mut OpState) -> u32 {
+    audio(state).rate()
+}
+#[op2(fast)]
+fn op_uw_audio_start(state: &mut OpState) -> Result<(), JsErrorBox> {
+    audio(state).start().map_err(js_err)
+}
+#[op2(fast)]
+fn op_uw_audio_stop(state: &mut OpState) {
+    audio(state).stop()
+}
+#[op2(fast)]
+fn op_uw_audio_volume(state: &mut OpState, v: f64) {
+    audio(state).engine.set_volume(v as f32)
+}
+#[op2(fast)]
+fn op_uw_osc_new(
+    state: &mut OpState,
+    #[string] wave: &str,
+    freq: f64,
+    amp: f64,
+    pan: f64,
+) -> Result<u32, JsErrorBox> {
+    let wave = Wave::parse(wave)
+        .ok_or_else(|| JsErrorBox::type_error(format!("unknown wave {wave:?}")))?;
+    let a = audio(state);
+    a.start().map_err(js_err)?;
+    let id = a
+        .engine
+        .osc_new(wave, 0.0, 0.0, 0.0)
+        .ok_or_else(|| JsErrorBox::range_error("too many oscillators"))?;
+    a.engine.osc_set(id, freq as f32, amp as f32, pan as f32);
+    Ok(id)
+}
+#[op2(fast)]
+fn op_uw_osc_set(state: &mut OpState, id: u32, freq: f64, amp: f64, pan: f64) {
+    audio(state)
+        .engine
+        .osc_set(id, freq as f32, amp as f32, pan as f32)
+}
+#[op2(fast)]
+fn op_uw_osc_free(state: &mut OpState, id: u32) {
+    audio(state).engine.osc_free(id)
+}
+/// The last `frames` frames played (mono), as little-endian f32 bytes.
+#[op2]
+#[buffer]
+fn op_uw_audio_scope(state: &mut OpState, frames: u32) -> Vec<u8> {
+    audio(state)
+        .engine
+        .scope(frames as usize)
+        .iter()
+        .flat_map(|x| x.to_le_bytes())
+        .collect()
+}
+#[op2(fast)]
+fn op_uw_pd_open(state: &mut OpState, #[string] path: &str) -> Result<(), JsErrorBox> {
+    audio(state).pd_open(path).map_err(js_err)
+}
+fn pd_value(v: &serde_json::Value) -> Result<PdValue, JsErrorBox> {
+    Ok(match v {
+        serde_json::Value::Null => PdValue::Bang,
+        serde_json::Value::Number(n) => PdValue::Float(n.as_f64().unwrap_or(0.0) as f32),
+        serde_json::Value::String(s) => PdValue::Symbol(s.clone()),
+        serde_json::Value::Bool(b) => PdValue::Float(if *b { 1.0 } else { 0.0 }),
+        serde_json::Value::Array(a) => {
+            PdValue::List(a.iter().map(pd_value).collect::<Result<_, _>>()?)
+        }
+        _ => {
+            return Err(JsErrorBox::type_error(
+                "send numbers, strings, arrays of them, or nothing (bang)",
+            ));
+        }
+    })
+}
+fn json_value(v: PdValue) -> serde_json::Value {
+    match v {
+        PdValue::Bang => serde_json::Value::Null,
+        PdValue::Float(x) => serde_json::json!(x),
+        PdValue::Symbol(s) => serde_json::Value::String(s),
+        PdValue::List(l) => serde_json::Value::Array(l.into_iter().map(json_value).collect()),
+    }
+}
+#[op2]
+fn op_uw_pd_send(
+    #[string] receiver: String,
+    #[serde] value: serde_json::Value,
+) -> Result<(), JsErrorBox> {
+    pd::send(&receiver, &pd_value(&value)?).map_err(js_err)
+}
+#[op2(fast)]
+fn op_uw_pd_subscribe(#[string] receiver: &str) -> Result<(), JsErrorBox> {
+    pd::subscribe(receiver).map_err(js_err)
+}
+#[derive(Default)]
+struct PdInbox(Vec<PdMessage>);
+#[op2]
+#[serde]
+fn op_uw_pd_next(state: &mut OpState) -> Vec<(String, serde_json::Value)> {
+    std::mem::take(&mut state.borrow_mut::<PdInbox>().0)
+        .into_iter()
+        .map(|m| (m.receiver, json_value(m.value)))
+        .collect()
+}
+
 deno_core::extension!(
     underweb,
     ops = [
@@ -339,16 +460,21 @@ deno_core::extension!(
         op_uw_net_tcp_connect, op_uw_net_tcp_listen, op_uw_net_udp_open, op_uw_net_send,
         op_uw_net_udp_send, op_uw_net_close, op_uw_fetch, op_uw_net_next, op_uw_net_data,
         op_uw_storage_get, op_uw_storage_set, op_uw_storage_remove, op_uw_storage_keys,
+        op_uw_audio_rate, op_uw_audio_start, op_uw_audio_stop, op_uw_audio_volume,
+        op_uw_osc_new, op_uw_osc_set, op_uw_osc_free, op_uw_audio_scope,
+        op_uw_pd_open, op_uw_pd_send, op_uw_pd_subscribe, op_uw_pd_next,
     ],
     esm_entry_point = "ext:underweb/underweb.js",
     esm = [dir "js", "underweb.js"],
-    options = { scene: SharedScene, net: Net, data_dir: PathBuf },
+    options = { scene: SharedScene, net: Net, data_dir: PathBuf, audio: SharedAudio },
     state = |state, options| {
         state.put::<SharedScene>(options.scene);
         state.put(Logs::default());
         state.put(options.net);
         state.put(NetInbox::default());
         state.put(DataDir(options.data_dir));
+        state.put::<SharedAudio>(options.audio);
+        state.put(PdInbox::default());
     },
 );
 
@@ -384,7 +510,7 @@ impl PackageLoader {
     fn load_sync(&self, specifier: &ModuleSpecifier) -> Result<ModuleSource, ModuleLoaderError> {
         if specifier.as_str() == API_SPECIFIER {
             let code = "const u = globalThis.__uw;\n\
-                        export const Layout = u.Layout, Shape = u.Shape, window = u.window, net = u.net, storage = u.storage;\n";
+                        export const Layout = u.Layout, Shape = u.Shape, window = u.window, net = u.net, storage = u.storage, audio = u.audio;\n";
             return Ok(ModuleSource::new(
                 ModuleType::JavaScript,
                 ModuleSourceCode::String(code.to_string().into()),
@@ -454,18 +580,36 @@ pub struct JsPage {
 
 impl JsPage {
     /// Creates the V8 isolate. Runs before lockdown; loads no package code.
-    pub fn new(pkg: &Package, scene: SharedScene, chan: &Channel, data: &Path) -> Result<JsPage> {
+    pub fn new(
+        pkg: &Package,
+        scene: SharedScene,
+        chan: &Channel,
+        data: &Path,
+        audio: SharedAudio,
+    ) -> Result<JsPage> {
         let entry = pkg.entry_path().context("no entry")?;
         let entry =
             ModuleSpecifier::from_file_path(&entry).map_err(|_| anyhow!("bad entry path"))?;
-        let runtime = JsRuntime::new(RuntimeOptions {
-            module_loader: Some(Rc::new(PackageLoader {
-                root: pkg.dir.clone(),
-            })),
-            extensions: vec![underweb::init(scene, Net::new(chan), data.to_path_buf())],
-            ..Default::default()
-        });
-        let tokio = tokio::runtime::Builder::new_current_thread().build()?;
+        // V8 schedules delayed work (garbage collection) through tokio:
+        // the isolate must be created inside a runtime with timers
+        let tokio = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()?;
+        let runtime = {
+            let _context = tokio.enter();
+            JsRuntime::new(RuntimeOptions {
+                module_loader: Some(Rc::new(PackageLoader {
+                    root: pkg.dir.clone(),
+                })),
+                extensions: vec![underweb::init(
+                    scene,
+                    Net::new(chan),
+                    data.to_path_buf(),
+                    audio,
+                )],
+                ..Default::default()
+            })
+        };
         Ok(JsPage {
             runtime,
             tokio,
@@ -547,6 +691,34 @@ impl Page for JsPage {
         let result = self
             .runtime
             .execute_script("<underweb>", "globalThis.__uw.netEvents()");
+        self.flush_logs();
+        result.map_err(|e| anyhow!("{e}"))?;
+        let rt = &mut self.runtime;
+        self.tokio.block_on(rt.run_event_loop(Default::default()))?;
+        self.flush_logs();
+        Ok(())
+    }
+
+    fn pd(&mut self, msgs: Vec<PdMessage>) -> Result<()> {
+        let (print, msgs): (Vec<_>, Vec<_>) = msgs.into_iter().partition(|m| m.receiver == "print");
+        let chan = unsafe { &*self.chan };
+        for p in print {
+            if let PdValue::Symbol(line) = p.value {
+                let _ = chan.send(&GuestMsg::Log(format!("pd: {line}")), None);
+            }
+        }
+        if msgs.is_empty() {
+            return Ok(());
+        }
+        self.runtime
+            .op_state()
+            .borrow_mut()
+            .borrow_mut::<PdInbox>()
+            .0
+            .extend(msgs);
+        let result = self
+            .runtime
+            .execute_script("<underweb>", "globalThis.__uw.pdMessages()");
         self.flush_logs();
         result.map_err(|e| anyhow!("{e}"))?;
         let rt = &mut self.runtime;

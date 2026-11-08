@@ -12,8 +12,11 @@ use underweb_abi::*;
 use underweb_guest::{PathOp, Rgba, Scene, Shape, cairo};
 use underweb_ipc::{Channel, GuestMsg, NetEvent, NetEventKind, NetOp};
 
+use crate::audio::Audio;
 use crate::net::{Net, parse_headers};
 use crate::page::Page;
+use underweb_audio::pd::{self, PdMessage, PdValue};
+use underweb_audio::ugens::Wave;
 
 struct Ctx {
     scene: Rc<RefCell<Scene>>,
@@ -23,6 +26,7 @@ struct Ctx {
     chan: *const Channel,
     net: Net,
     data_dir: CString,
+    audio: Rc<Audio>,
 }
 
 pub struct NativePage {
@@ -34,6 +38,7 @@ pub struct NativePage {
     draw: Option<UwDrawFn>,
     deactivate: Option<UwDeactivateFn>,
     net: Option<UwNetFn>,
+    pd: Option<UwPdFn>,
     // last: unloading must happen after everything above
     _lib: Library,
 }
@@ -44,6 +49,7 @@ impl NativePage {
         scene: Rc<RefCell<Scene>>,
         chan: &Channel,
         data: &Path,
+        audio: Rc<Audio>,
     ) -> Result<NativePage> {
         let lib =
             unsafe { Library::new(path) }.with_context(|| format!("loading {}", path.display()))?;
@@ -65,6 +71,7 @@ impl NativePage {
                 .ok()
                 .map(|s| *s);
             let net = lib.get::<UwNetFn>(b"uw_net\0").ok().map(|s| *s);
+            let pd = lib.get::<UwPdFn>(b"uw_pd\0").ok().map(|s| *s);
 
             let mut ctx = Box::new(Ctx {
                 scene,
@@ -72,6 +79,7 @@ impl NativePage {
                 chan,
                 net: Net::new(chan),
                 data_dir: CString::new(data.to_string_lossy().as_bytes())?,
+                audio,
             });
             let host = Box::new(host_table(&mut *ctx as *mut Ctx as *mut c_void));
             Ok(NativePage {
@@ -83,6 +91,7 @@ impl NativePage {
                 draw,
                 deactivate,
                 net,
+                pd,
                 _lib: lib,
             })
         }
@@ -130,6 +139,53 @@ impl Page for NativePage {
             text: text.as_ptr(),
         };
         unsafe { f(&*self.host, &raw) };
+        Ok(())
+    }
+
+    fn pd(&mut self, msgs: Vec<PdMessage>) -> Result<()> {
+        for m in msgs {
+            if m.receiver == "print" {
+                if let PdValue::Symbol(line) = &m.value {
+                    let _ = unsafe { &*self._ctx.chan }
+                        .send(&GuestMsg::Log(format!("pd: {line}")), None);
+                }
+                continue;
+            }
+            let Some(f) = self.pd else { continue };
+            let receiver = CString::new(m.receiver.replace('\0', "")).unwrap_or_default();
+            let mut symbol = CString::default();
+            let mut list: Vec<f32> = Vec::new();
+            let (kind, value) = match &m.value {
+                PdValue::Bang => (UW_PD_BANG, 0.0),
+                PdValue::Float(x) => (UW_PD_FLOAT, *x),
+                PdValue::Symbol(s) => {
+                    symbol = CString::new(s.replace('\0', "")).unwrap_or_default();
+                    (UW_PD_SYMBOL, 0.0)
+                }
+                PdValue::List(items) => {
+                    list = items
+                        .iter()
+                        .filter_map(|i| {
+                            if let PdValue::Float(x) = i {
+                                Some(*x)
+                            } else {
+                                None
+                            }
+                        })
+                        .collect();
+                    (UW_PD_LIST, 0.0)
+                }
+            };
+            let ev = UwPdEvent {
+                receiver: receiver.as_ptr(),
+                kind,
+                value,
+                symbol: symbol.as_ptr(),
+                list: list.as_ptr(),
+                len: list.len(),
+            };
+            unsafe { f(&*self.host, &ev) };
+        }
         Ok(())
     }
 
@@ -335,6 +391,110 @@ extern "C" fn fetch(
     })
 }
 
+// ---- audio ----
+
+fn audio<'a>(p: *mut c_void) -> &'a Audio {
+    &ctx(p).audio
+}
+fn log_err(p: *mut c_void, r: anyhow::Result<()>) -> bool {
+    match r {
+        Ok(()) => true,
+        Err(e) => {
+            let _ = unsafe { &*ctx(p).chan }.send(&GuestMsg::Log(format!("{e:#}")), None);
+            false
+        }
+    }
+}
+extern "C" fn audio_rate(p: *mut c_void) -> u32 {
+    audio(p).rate()
+}
+extern "C" fn audio_start(p: *mut c_void) -> bool {
+    log_err(p, audio(p).start())
+}
+extern "C" fn audio_stop(p: *mut c_void) {
+    audio(p).stop()
+}
+extern "C" fn audio_volume(p: *mut c_void, v: f32) {
+    audio(p).engine.set_volume(v)
+}
+extern "C" fn osc_new(p: *mut c_void, wave: u32, freq: f32, amp: f32, pan: f32) -> u32 {
+    let a = audio(p);
+    if !log_err(p, a.start()) {
+        return 0;
+    }
+    let Some(id) = a
+        .engine
+        .osc_new(Wave::from_index(wave).unwrap_or(Wave::Sine), 0.0, 0.0, 0.0)
+    else {
+        return 0;
+    };
+    a.engine.osc_set(id, freq, amp, pan);
+    id
+}
+extern "C" fn osc_set(p: *mut c_void, id: u32, freq: f32, amp: f32, pan: f32) {
+    audio(p).engine.osc_set(id, freq, amp, pan)
+}
+extern "C" fn osc_free(p: *mut c_void, id: u32) {
+    audio(p).engine.osc_free(id)
+}
+extern "C" fn audio_scope(p: *mut c_void, out: *mut f32, count: usize) -> usize {
+    if out.is_null() {
+        return 0;
+    }
+    let s = audio(p).engine.scope(count);
+    unsafe { std::ptr::copy_nonoverlapping(s.as_ptr(), out, s.len()) };
+    s.len()
+}
+/// The package's callback and its pointer, moved to the audio thread.
+struct SendPtr(*mut c_void);
+unsafe impl Send for SendPtr {}
+extern "C" fn audio_callback(p: *mut c_void, cb: Option<UwAudioFn>, user: *mut c_void) {
+    let a = audio(p);
+    match cb {
+        None => a.engine.set_callback(None),
+        Some(cb) => {
+            if !log_err(p, a.start()) {
+                return;
+            }
+            let user = SendPtr(user);
+            a.engine
+                .set_callback(Some(Box::new(move |frames: &mut [f32]| {
+                    let u = &user;
+                    cb(u.0, frames.as_mut_ptr(), frames.len() / 2, 2)
+                })));
+        }
+    }
+}
+extern "C" fn pd_open(p: *mut c_void, path: *const c_char) -> bool {
+    log_err(p, audio(p).pd_open(&string(path)))
+}
+extern "C" fn pd_bang(p: *mut c_void, r: *const c_char) {
+    log_err(p, pd::send(&string(r), &PdValue::Bang));
+}
+extern "C" fn pd_float(p: *mut c_void, r: *const c_char, v: f32) {
+    log_err(p, pd::send(&string(r), &PdValue::Float(v)));
+}
+extern "C" fn pd_symbol(p: *mut c_void, r: *const c_char, s: *const c_char) {
+    log_err(p, pd::send(&string(r), &PdValue::Symbol(string(s))));
+}
+extern "C" fn pd_list(p: *mut c_void, r: *const c_char, values: *const f32, count: usize) {
+    let v = if values.is_null() {
+        &[][..]
+    } else {
+        unsafe { std::slice::from_raw_parts(values, count) }
+    };
+    log_err(
+        p,
+        pd::send(
+            &string(r),
+            &PdValue::List(v.iter().map(|x| PdValue::Float(*x)).collect()),
+        ),
+    );
+}
+extern "C" fn pd_subscribe(p: *mut c_void, r: *const c_char) {
+    log_err(p, pd::subscribe(&string(r)));
+}
+
 fn host_table(ctx: *mut c_void) -> UwHost {
     UwHost {
         abi_version: UW_ABI_VERSION,
@@ -370,5 +530,20 @@ fn host_table(ctx: *mut c_void) -> UwHost {
         net_udp_send,
         net_close,
         fetch,
+        audio_rate,
+        audio_start,
+        audio_stop,
+        audio_volume,
+        osc_new,
+        osc_set,
+        osc_free,
+        audio_scope,
+        audio_callback,
+        pd_open,
+        pd_bang,
+        pd_float,
+        pd_symbol,
+        pd_list,
+        pd_subscribe,
     }
 }

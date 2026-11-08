@@ -7,8 +7,9 @@
 #include <stdint.h>
 
 // The ABI this header describes. Version 2 appended network and storage
-// functions to [`UwHost`]; packages built for version 1 still load.
-#define UW_ABI_VERSION 2
+// functions to [`UwHost`], version 3 audio; packages built for older
+// versions still load.
+#define UW_ABI_VERSION 3
 
 // The oldest ABI the runner still accepts.
 #define UW_ABI_MIN_VERSION 1
@@ -37,6 +38,29 @@
 // A fetch finished: `status`, the body in `data`/`len`, and the headers
 // in `text` as "name: value" lines.
 #define UW_NET_RESPONSE 5
+
+// Oscillator waves for `osc_new`.
+#define UW_WAVE_SINE 0
+
+#define UW_WAVE_SAW 1
+
+#define UW_WAVE_SQUARE 2
+
+#define UW_WAVE_TRIANGLE 3
+
+#define UW_WAVE_NOISE 4
+
+// [`UwPdEvent::kind`]
+#define UW_PD_BANG 0
+
+#define UW_PD_FLOAT 1
+
+#define UW_PD_SYMBOL 2
+
+// The floats of a list (symbols in it are left out).
+#define UW_PD_LIST 3
+
+typedef struct Option_UwAudioFn Option_UwAudioFn;
 
 // The function table the runner hands to a native package.
 // `ctx` must be passed back as the first argument of every call.
@@ -101,6 +125,29 @@ typedef struct UwHost {
                     const char *headers,
                     const uint8_t *body,
                     uintptr_t len);
+  // The browser's sample rate; 0 if it has no audio.
+  uint32_t (*audio_rate)(void *ctx);
+  // Start sound (oscillators, Pd and `audio_callback` start it too).
+  bool (*audio_start)(void *ctx);
+  void (*audio_stop)(void *ctx);
+  void (*audio_volume)(void *ctx, float volume);
+  // `wave` is a `UW_WAVE_*`; `pan` from -1 (left) to 1. Returns 0 if
+  // none is free.
+  uint32_t (*osc_new)(void *ctx, uint32_t wave, float freq, float amp, float pan);
+  void (*osc_set)(void *ctx, uint32_t id, float freq, float amp, float pan);
+  void (*osc_free)(void *ctx, uint32_t id);
+  // Copy up to `count` of the latest frames played (mono) to `out`.
+  uintptr_t (*audio_scope)(void *ctx, float *out, uintptr_t count);
+  // Mix your own audio in; `None` removes it.
+  void (*audio_callback)(void *ctx, struct Option_UwAudioFn callback, void *user);
+  // Open a Pd patch from the package (relative path); starts sound.
+  bool (*pd_open)(void *ctx, const char *path);
+  void (*pd_bang)(void *ctx, const char *receiver);
+  void (*pd_float)(void *ctx, const char *receiver, float value);
+  void (*pd_symbol)(void *ctx, const char *receiver, const char *symbol);
+  void (*pd_list)(void *ctx, const char *receiver, const float *values, uintptr_t count);
+  // Receive what Pd sends to `[s receiver]` in `uw_pd`.
+  void (*pd_subscribe)(void *ctx, const char *receiver);
 } UwHost;
 
 typedef struct UwPointerEvent {
@@ -127,6 +174,17 @@ typedef struct UwNetEvent {
   const char *text;
 } UwNetEvent;
 
+// Something Pd sent to a receiver the package subscribed to. Pointers
+// are valid only during the `uw_pd` call.
+typedef struct UwPdEvent {
+  const char *receiver;
+  uint32_t kind;
+  float value;
+  const char *symbol;
+  const float *list;
+  uintptr_t len;
+} UwPdEvent;
+
 /* A native package exports these. Only uw_abi_version and uw_activate are
  * required. uw_draw gets a cairo_t* (include <cairo.h> to use it). */
 uint32_t uw_abi_version(void);
@@ -136,6 +194,7 @@ void uw_pointer(const UwHost *host, const UwPointerEvent *ev);
 void uw_draw(const UwHost *host, void *cr, double w, double h);
 void uw_deactivate(const UwHost *host);
 void uw_net(const UwHost *host, const UwNetEvent *ev);
+void uw_pd(const UwHost *host, const UwPdEvent *ev);
 
 /* Convenience: call a host function with its context, e.g.
  *   UW(host, set_title, "hello");                                       */

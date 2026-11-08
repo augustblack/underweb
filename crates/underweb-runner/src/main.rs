@@ -9,6 +9,7 @@
 //! fonts, V8) is set up first, then the process locks itself down, and only
 //! then is package code loaded.
 
+mod audio;
 mod build;
 mod js;
 mod native;
@@ -30,6 +31,7 @@ struct Args {
     data: PathBuf,
     sandbox: bool,
     params: Vec<(String, String)>,
+    audio_rate: u32,
 }
 
 fn parse_args() -> Result<Args> {
@@ -37,12 +39,14 @@ fn parse_args() -> Result<Args> {
     let (mut ipc_fd, mut package, mut data) = (None, None, None);
     let mut sandbox = true;
     let mut params = Vec::new();
+    let mut audio_rate = 0;
     while let Some(a) = it.next() {
         match a.as_str() {
             "--ipc-fd" => ipc_fd = Some(it.next().context("--ipc-fd N")?.parse()?),
             "--package" => package = Some(PathBuf::from(it.next().context("--package DIR")?)),
             "--data" => data = Some(PathBuf::from(it.next().context("--data DIR")?)),
             "--no-sandbox" => sandbox = false,
+            "--audio-rate" => audio_rate = it.next().context("--audio-rate N")?.parse()?,
             "--param" => {
                 let kv = it.next().context("--param k=v")?;
                 let (k, v) = kv.split_once('=').unwrap_or((&kv, ""));
@@ -57,6 +61,7 @@ fn parse_args() -> Result<Args> {
         data: data.context("missing --data")?,
         sandbox,
         params,
+        audio_rate,
     })
 }
 
@@ -90,6 +95,7 @@ fn run(chan: &Channel, args: Args) -> Result<()> {
     underweb_guest::warm_up_fonts();
 
     let scene = Rc::new(RefCell::new(Scene::new()));
+    let audio = Rc::new(audio::Audio::new(chan, args.audio_rate, &pkg.dir));
     scene
         .borrow_mut()
         .params
@@ -114,16 +120,17 @@ fn run(chan: &Channel, args: Args) -> Result<()> {
 
     match pkg.kind() {
         Kind::Js | Kind::Ts => {
-            let mut page = js::JsPage::new(&pkg, scene.clone(), chan, &args.data)?;
+            let mut page = js::JsPage::new(&pkg, scene.clone(), chan, &args.data, audio.clone())?;
             lock(chan)?;
             page.load()?;
-            page::run(chan, &scene, &mut page)
+            page::run(chan, &scene, &mut page, &audio)
         }
         Kind::Rust | Kind::C => {
             let lib = pkg.native_library()?;
             lock(chan)?;
-            let mut page = native::NativePage::load(&lib, scene.clone(), chan, &args.data)?;
-            page::run(chan, &scene, &mut page)
+            let mut page =
+                native::NativePage::load(&lib, scene.clone(), chan, &args.data, audio.clone())?;
+            page::run(chan, &scene, &mut page, &audio)
         }
     }
 }

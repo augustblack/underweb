@@ -1,0 +1,6 @@
+[package]
+name = "hello-pd"
+version = "0.1.0"
+kind = "js"
+entry = "main.js"
+description = "demos/15puredata, ported: the original 440.pd patch, played from the page."
