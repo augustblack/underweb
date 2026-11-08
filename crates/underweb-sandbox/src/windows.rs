@@ -31,17 +31,19 @@ use windows_sys::Win32::Foundation::{
     WAIT_OBJECT_0, WAIT_TIMEOUT,
 };
 use windows_sys::Win32::Security::Authorization::{
-    ConvertStringSidToSidW, EXPLICIT_ACCESS_W, GRANT_ACCESS, GetEffectiveRightsFromAclW,
-    GetNamedSecurityInfoW, NO_MULTIPLE_TRUSTEE, SE_FILE_OBJECT, SetEntriesInAclW,
-    SetNamedSecurityInfoW, TRUSTEE_IS_SID, TRUSTEE_IS_WELL_KNOWN_GROUP, TRUSTEE_W,
+    ConvertStringSecurityDescriptorToSecurityDescriptorW, ConvertStringSidToSidW,
+    EXPLICIT_ACCESS_W, GRANT_ACCESS, GetNamedSecurityInfoW, NO_MULTIPLE_TRUSTEE, SDDL_REVISION_1,
+    SE_FILE_OBJECT, SetEntriesInAclW, SetNamedSecurityInfoW, TRUSTEE_IS_SID,
+    TRUSTEE_IS_WELL_KNOWN_GROUP, TRUSTEE_W,
 };
 use windows_sys::Win32::Security::Isolation::{
     CreateAppContainerProfile, DeriveAppContainerSidFromAppContainerName,
 };
 use windows_sys::Win32::Security::{
-    ACL, DACL_SECURITY_INFORMATION, DeriveCapabilitySidsFromName, FreeSid, GetTokenInformation,
-    NO_INHERITANCE, PSECURITY_DESCRIPTOR, PSID, SECURITY_CAPABILITIES, SID_AND_ATTRIBUTES,
-    SUB_CONTAINERS_AND_OBJECTS_INHERIT, TOKEN_QUERY, TokenIsAppContainer,
+    ACCESS_ALLOWED_ACE, ACE_HEADER, ACL, DACL_SECURITY_INFORMATION, DeriveCapabilitySidsFromName,
+    EqualSid, FreeSid, GetAce, GetSecurityDescriptorSacl, GetTokenInformation,
+    LABEL_SECURITY_INFORMATION, NO_INHERITANCE, PSECURITY_DESCRIPTOR, PSID, SECURITY_CAPABILITIES,
+    SID_AND_ATTRIBUTES, SUB_CONTAINERS_AND_OBJECTS_INHERIT, TOKEN_QUERY, TokenIsAppContainer,
 };
 use windows_sys::Win32::Storage::FileSystem::{
     FILE_ALL_ACCESS, FILE_GENERIC_EXECUTE, FILE_GENERIC_READ,
@@ -57,6 +59,7 @@ use windows_sys::Win32::System::JobObjects::{
     JobObjectBasicUIRestrictions, JobObjectExtendedLimitInformation, SetInformationJobObject,
 };
 use windows_sys::Win32::System::Pipes::CreatePipe;
+use windows_sys::Win32::System::SystemServices::ACCESS_ALLOWED_ACE_TYPE;
 use windows_sys::Win32::System::Threading::{
     CREATE_NO_WINDOW, CREATE_SUSPENDED, CREATE_UNICODE_ENVIRONMENT, CreateProcessW,
     DeleteProcThreadAttributeList, EXTENDED_STARTUPINFO_PRESENT, GetCurrentProcess,
@@ -306,13 +309,11 @@ fn grant(path: &Path, sid: &Sid, access: u32, inherit: bool) -> Result<()> {
     }
     let _sd = Free(sd);
 
-    let allowed = |s: &Sid| -> bool {
-        let mut mask = 0u32;
-        let t = trustee(s);
-        let ok = unsafe { GetEffectiveRightsFromAclW(dacl, &t, &mut mask) } == ERROR_SUCCESS;
-        ok && mask & access == access
-    };
-    if allowed(sid) || (access == READ && allowed(&string_sid(ALL_APP_PACKAGES)?)) {
+    // read the entries themselves (GetEffectiveRightsFromAcl guesses
+    // wrong for container SIDs and made us skip needed grants)
+    if has_entry(dacl, sid.ptr, access)
+        || (access == READ && has_entry(dacl, string_sid(ALL_APP_PACKAGES)?.ptr, access))
+    {
         return Ok(());
     }
 
@@ -355,6 +356,84 @@ fn grant(path: &Path, sid: &Sid, access: u32, inherit: bool) -> Result<()> {
         );
     }
     Ok(())
+}
+
+/// Whether `dacl` has an allow entry for exactly `sid` with all of
+/// `access` (directly or inherited).
+fn has_entry(dacl: *const ACL, sid: PSID, access: u32) -> bool {
+    if dacl.is_null() {
+        return true; // no DACL: everyone may do everything
+    }
+    let count = unsafe { (*dacl).AceCount };
+    (0..count as u32).any(|i| {
+        let mut ace: *mut c_void = std::ptr::null_mut();
+        if unsafe { GetAce(dacl, i, &mut ace) } == 0 {
+            return false;
+        }
+        let header = unsafe { &*(ace as *const ACE_HEADER) };
+        if header.AceType as u32 != ACCESS_ALLOWED_ACE_TYPE {
+            return false;
+        }
+        let allowed = unsafe { &*(ace as *const ACCESS_ALLOWED_ACE) };
+        let ace_sid = (&allowed.SidStart as *const u32)
+            .cast_mut()
+            .cast::<c_void>();
+        let same = unsafe { EqualSid(ace_sid, sid) } != 0;
+        same && allowed.Mask & access == access
+    })
+}
+
+/// Label `path` (and what it holds) low integrity, so a container, which
+/// runs at low integrity, may write there: Windows refuses low-integrity
+/// writes to ordinary (medium) files whatever their DACL says.
+fn label_low(path: &Path) -> Result<()> {
+    let mut sd: PSECURITY_DESCRIPTOR = std::ptr::null_mut();
+    // mandatory label: low, inherited by files and folders, no write-up
+    let sddl = wide("S:(ML;OICI;NW;;;LW)");
+    if unsafe {
+        ConvertStringSecurityDescriptorToSecurityDescriptorW(
+            sddl.as_ptr(),
+            SDDL_REVISION_1,
+            &mut sd,
+            std::ptr::null_mut(),
+        )
+    } == 0
+    {
+        return Err(last_error("building the low integrity label"));
+    }
+    let _free = LocalMem(sd);
+    let (mut present, mut defaulted) = (0, 0);
+    let mut sacl: *mut ACL = std::ptr::null_mut();
+    if unsafe { GetSecurityDescriptorSacl(sd, &mut present, &mut sacl, &mut defaulted) } == 0 {
+        return Err(last_error("GetSecurityDescriptorSacl"));
+    }
+    let err = unsafe {
+        SetNamedSecurityInfoW(
+            wide(path).as_ptr(),
+            SE_FILE_OBJECT,
+            LABEL_SECURITY_INFORMATION,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            std::ptr::null(),
+            sacl,
+        )
+    };
+    if err != ERROR_SUCCESS {
+        bail!(
+            "labelling {} for the sandbox: {}",
+            path.display(),
+            io::Error::from_raw_os_error(err as i32)
+        );
+    }
+    Ok(())
+}
+
+/// Memory Windows handed us to `LocalFree`.
+struct LocalMem(*mut c_void);
+impl Drop for LocalMem {
+    fn drop(&mut self) {
+        unsafe { LocalFree(self.0) };
+    }
 }
 
 /// The program, the DLLs next to it, and the directory itself (to list
@@ -487,6 +566,7 @@ pub fn spawn(l: &Launch) -> Result<Process> {
             }
             for d in &policy.read_write {
                 grant(d, &sid, FILE_ALL_ACCESS, true)?;
+                label_low(d)?;
             }
             let mut caps = Vec::new();
             for name in &c.capabilities {

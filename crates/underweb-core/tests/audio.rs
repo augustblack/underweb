@@ -48,6 +48,7 @@ fn record(
     let (mut l, mut r) = (Vec::new(), Vec::new());
     let mut buf = vec![0f32; 256 * 2];
     let deadline = Instant::now() + Duration::from_secs(15);
+    let mut since: Option<Instant> = None;
     while l.len() < want && Instant::now() < deadline {
         while let Some(e) = guest.try_event() {
             match e {
@@ -56,9 +57,18 @@ fn record(
                 _ => {}
             }
         }
+        // once sound starts, pull at the sound card's pace, not faster:
+        // a slow machine would otherwise fall behind and leave gaps
+        if let Some(t) = since
+            && (l.len() as f64) >= t.elapsed().as_secs_f64() * RATE as f64
+        {
+            std::thread::sleep(Duration::from_millis(2));
+            continue;
+        }
         mixer.render(&mut buf);
         let started = !l.is_empty() || buf.iter().any(|x| x.abs() > 1e-4);
         if started {
+            since.get_or_insert_with(Instant::now);
             l.extend(buf.chunks_exact(2).map(|p| p[0]));
             r.extend(buf.chunks_exact(2).map(|p| p[1]));
         }
