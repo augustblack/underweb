@@ -28,6 +28,15 @@ runs:
     # GStreamer's MSVC installer carries its own glib, cairo and pango;
     # using those for everything keeps a single glib in each process.
     # Since 1.26 it is one Inno Setup .exe (runtime + development files).
+    # the 540 MB installer, kept between runs (keep the version in the key
+    # in sync with $v below)
+    - name: Windows GStreamer installer cache
+      if: runner.os == 'Windows'
+      uses: actions/cache@v4
+      with:
+        path: ${{ runner.temp }}\gst-installer
+        key: gstreamer-msvc-x86_64-1.28.8
+
     - name: Windows GStreamer (with cairo and pango)
       if: runner.os == 'Windows'
       shell: pwsh
@@ -35,8 +44,15 @@ runs:
         $v = "1.28.8"
         $f = "gstreamer-1.0-msvc-x86_64-$v.exe"
         $dir = "C:\gstreamer"
-        Invoke-WebRequest "https://gstreamer.freedesktop.org/data/pkg/windows/$v/msvc/$f" -OutFile "$env:RUNNER_TEMP\$f"
-        $p = Start-Process "$env:RUNNER_TEMP\$f" -Wait -PassThru -ArgumentList `
+        $exe = "$env:RUNNER_TEMP\gst-installer\$f"
+        if (-not (Test-Path $exe)) {
+          New-Item -ItemType Directory -Force "$env:RUNNER_TEMP\gst-installer" | Out-Null
+          # the server sometimes cuts this download: retry, resuming
+          curl.exe --fail --location --retry 5 --retry-all-errors --retry-delay 5 -C - `
+            -o $exe "https://gstreamer.freedesktop.org/data/pkg/windows/$v/msvc/$f"
+          if ($LASTEXITCODE -ne 0) { throw "downloading $f failed" }
+        }
+        $p = Start-Process $exe -Wait -PassThru -ArgumentList `
           "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART", "/SP-", "/TYPE=full", "/DIR=$dir", "/LOG=$env:RUNNER_TEMP\gst-install.log"
         if ($p.ExitCode -ne 0) {
           Get-Content "$env:RUNNER_TEMP\gst-install.log" -Tail 40

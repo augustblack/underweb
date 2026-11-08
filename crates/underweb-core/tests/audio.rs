@@ -112,9 +112,10 @@ fn pure_data_patch_plays_and_answers() {
     let mixer = Mixer::new(RATE, 2);
     let g = spawn("probe-audio-js", &[("pd", "550")], &mixer);
     let mut logs = Vec::new();
-    let (l, r) = record(&mixer, &g, &mut logs, 1.0);
-    // skip the first block, which may still be at 440 Hz
-    let f = estimate_freq(&l[4800..], RATE as f64);
+    let (l, r) = record(&mixer, &g, &mut logs, 1.5);
+    // only the last half second: the patch starts at 440 Hz and the switch
+    // to 550 can come late on a slow machine
+    let f = estimate_freq(&l[l.len() - RATE as usize / 2..], RATE as f64);
     assert!((f - 550.0).abs() < 3.0, "{f}");
     assert!((peak(&r) - 0.5).abs() < 0.05);
     drain_logs(&g, &mut logs, "PROBE pong");
