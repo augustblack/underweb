@@ -212,6 +212,98 @@ pub mod audio {
     }
 }
 
+fn host_v4() -> &'static UwHost {
+    let h = host();
+    assert!(
+        h.abi_version >= 4,
+        "this browser is too old for video functions"
+    );
+    h
+}
+
+/// Video streams, decoded by the browser in their own sandboxed processes
+/// and shown in shapes with [`crate::Shape::set_video`].
+pub mod video {
+    use super::{cstring, host_v4};
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+    pub struct Video(pub u32);
+
+    #[derive(Debug, Clone, Copy, Default)]
+    pub struct Info {
+        pub width: u32,
+        pub height: u32,
+        pub position: f64,
+        pub duration: f64,
+    }
+
+    /// A file in the package, an http(s) URL, "camera", or "test:<pattern>".
+    pub fn open(source: &str, looping: bool) -> Video {
+        let h = host_v4();
+        Video((h.media_open)(h.ctx, cstring(source).as_ptr(), looping))
+    }
+
+    /// Show `source` and send it to an Icecast server
+    /// (`http://host:port/mount.ogg`).
+    pub fn broadcast(source: &str, url: &str, password: &str) -> Video {
+        let h = host_v4();
+        Video((h.media_broadcast)(
+            h.ctx,
+            cstring(source).as_ptr(),
+            cstring(url).as_ptr(),
+            cstring(password).as_ptr(),
+        ))
+    }
+
+    impl Video {
+        pub fn play(&self) {
+            let h = host_v4();
+            (h.media_play)(h.ctx, self.0)
+        }
+        pub fn pause(&self) {
+            let h = host_v4();
+            (h.media_pause)(h.ctx, self.0)
+        }
+        pub fn seek(&self, seconds: f64) {
+            let h = host_v4();
+            (h.media_seek)(h.ctx, self.0, seconds)
+        }
+        pub fn close(&self) {
+            let h = host_v4();
+            (h.media_close)(h.ctx, self.0)
+        }
+        /// None until the first frame.
+        pub fn info(&self) -> Option<Info> {
+            let h = host_v4();
+            let mut i = underweb_abi::UwMediaInfo::default();
+            (h.media_info)(h.ctx, self.0, &mut i).then_some(Info {
+                width: i.width,
+                height: i.height,
+                position: i.position,
+                duration: i.duration,
+            })
+        }
+    }
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub enum Kind {
+        Ready,
+        Ended,
+        Broadcasting,
+        Error,
+    }
+
+    #[derive(Debug, Clone)]
+    pub struct MediaEvent {
+        pub video: Video,
+        pub kind: Kind,
+        pub width: u32,
+        pub height: u32,
+        /// For errors: what went wrong.
+        pub text: String,
+    }
+}
+
 /// Pure Data patches shipped with the package.
 pub mod pd {
     use super::{cstring, host_v3};
@@ -407,6 +499,12 @@ impl Shape {
         self
     }
     /// A pango font description such as `"Serif Bold 18"`.
+    /// Show a video inside the shape, or none.
+    pub fn set_video(&self, video: Option<video::Video>) -> &Self {
+        let h = host_v4();
+        (h.shape_set_video)(h.ctx, self.0, video.map_or(0, |v| v.0));
+        self
+    }
     pub fn set_font(&self, font: &str) -> &Self {
         let h = host();
         (h.shape_set_font)(h.ctx, self.0, cstring(font).as_ptr());
@@ -441,6 +539,8 @@ pub trait Page: Default + 'static {
     fn net(&mut self, _window: &Window, _ev: &net::NetEvent) {}
     /// Something Pd sent to a receiver you subscribed to.
     fn pd(&mut self, _window: &Window, _ev: &pd::PdEvent) {}
+    /// Something happened to a video stream.
+    fn media(&mut self, _window: &Window, _ev: &video::MediaEvent) {}
     /// Draw with raw cairo on top of the layouts, in logical pixels.
     #[cfg(feature = "cairo")]
     fn draw(&mut self, _window: &Window, _cr: &cairo::Context, _width: f64, _height: f64) {}
@@ -581,6 +681,32 @@ pub mod __private {
         with(slot, |p, w| p.pd(w, &e));
     }
 
+    pub unsafe fn media<P: Page>(slot: &'static Slot<P>, ev: *const underweb_abi::UwMediaEvent) {
+        use underweb_abi::*;
+        let ev = unsafe { *ev };
+        let kind = match ev.kind {
+            UW_MEDIA_READY => video::Kind::Ready,
+            UW_MEDIA_ENDED => video::Kind::Ended,
+            UW_MEDIA_BROADCASTING => video::Kind::Broadcasting,
+            _ => video::Kind::Error,
+        };
+        let text = if ev.text.is_null() {
+            String::new()
+        } else {
+            unsafe { CStr::from_ptr(ev.text) }
+                .to_string_lossy()
+                .into_owned()
+        };
+        let e = video::MediaEvent {
+            video: video::Video(ev.id),
+            kind,
+            width: ev.width,
+            height: ev.height,
+            text,
+        };
+        with(slot, |p, w| p.media(w, &e));
+    }
+
     pub unsafe fn deactivate<P: Page>(slot: &'static Slot<P>) {
         with(slot, |p, w| p.deactivate(w));
         guard(|| slot.with(|p| *p.borrow_mut() = None));
@@ -624,6 +750,10 @@ macro_rules! export_page {
         #[unsafe(no_mangle)]
         pub unsafe extern "C" fn uw_pd(_host: *const $crate::abi::UwHost, ev: *const $crate::abi::UwPdEvent) {
             unsafe { $crate::__private::pd::<$page>(&__UW_PAGE, ev) }
+        }
+        #[unsafe(no_mangle)]
+        pub unsafe extern "C" fn uw_media(_host: *const $crate::abi::UwHost, ev: *const $crate::abi::UwMediaEvent) {
+            unsafe { $crate::__private::media::<$page>(&__UW_PAGE, ev) }
         }
         $crate::__export_draw!($page, __UW_PAGE);
         #[unsafe(no_mangle)]

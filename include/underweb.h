@@ -7,9 +7,9 @@
 #include <stdint.h>
 
 // The ABI this header describes. Version 2 appended network and storage
-// functions to [`UwHost`], version 3 audio; packages built for older
-// versions still load.
-#define UW_ABI_VERSION 3
+// functions to [`UwHost`], version 3 audio, version 4 video; packages
+// built for older versions still load.
+#define UW_ABI_VERSION 4
 
 // The oldest ABI the runner still accepts.
 #define UW_ABI_MIN_VERSION 1
@@ -39,6 +39,17 @@
 // in `text` as "name: value" lines.
 #define UW_NET_RESPONSE 5
 
+// [`UwMediaEvent::kind`]: frames are coming (`width`, `height`).
+#define UW_MEDIA_READY 0
+
+#define UW_MEDIA_ENDED 1
+
+// A broadcast is being sent.
+#define UW_MEDIA_BROADCASTING 2
+
+// `text` says what went wrong (including refused permissions).
+#define UW_MEDIA_ERROR 3
+
 // Oscillator waves for `osc_new`.
 #define UW_WAVE_SINE 0
 
@@ -61,6 +72,15 @@
 #define UW_PD_LIST 3
 
 typedef struct Option_UwAudioFn Option_UwAudioFn;
+
+typedef struct UwMediaInfo {
+  uint32_t width;
+  uint32_t height;
+  // Seconds.
+  double position;
+  // Seconds; 0 for live sources.
+  double duration;
+} UwMediaInfo;
 
 // The function table the runner hands to a native package.
 // `ctx` must be passed back as the first argument of every call.
@@ -148,6 +168,20 @@ typedef struct UwHost {
   void (*pd_list)(void *ctx, const char *receiver, const float *values, uintptr_t count);
   // Receive what Pd sends to `[s receiver]` in `uw_pd`.
   void (*pd_subscribe)(void *ctx, const char *receiver);
+  // A package file, an http(s) URL, "camera", or "test:<pattern>".
+  // Returns an id; events arrive in `uw_media`.
+  uint32_t (*media_open)(void *ctx, const char *source, bool looping);
+  // Like `media_open`, and send it to an Icecast server
+  // ("http://host:port/mount.ogg").
+  uint32_t (*media_broadcast)(void *ctx, const char *source, const char *url, const char *password);
+  void (*media_play)(void *ctx, uint32_t id);
+  void (*media_pause)(void *ctx, uint32_t id);
+  void (*media_seek)(void *ctx, uint32_t id, double seconds);
+  void (*media_close)(void *ctx, uint32_t id);
+  // False until the first frame.
+  bool (*media_info)(void *ctx, uint32_t id, struct UwMediaInfo *out);
+  // Show video `id` inside the shape (0: none).
+  void (*shape_set_video)(void *ctx, uint32_t shape, uint32_t video);
 } UwHost;
 
 typedef struct UwPointerEvent {
@@ -185,6 +219,14 @@ typedef struct UwPdEvent {
   uintptr_t len;
 } UwPdEvent;
 
+typedef struct UwMediaEvent {
+  uint32_t id;
+  uint32_t kind;
+  uint32_t width;
+  uint32_t height;
+  const char *text;
+} UwMediaEvent;
+
 /* A native package exports these. Only uw_abi_version and uw_activate are
  * required. uw_draw gets a cairo_t* (include <cairo.h> to use it). */
 uint32_t uw_abi_version(void);
@@ -195,6 +237,7 @@ void uw_draw(const UwHost *host, void *cr, double w, double h);
 void uw_deactivate(const UwHost *host);
 void uw_net(const UwHost *host, const UwNetEvent *ev);
 void uw_pd(const UwHost *host, const UwPdEvent *ev);
+void uw_media(const UwHost *host, const UwMediaEvent *ev);
 
 /* Convenience: call a host function with its context, e.g.
  *   UW(host, set_title, "hello");                                       */

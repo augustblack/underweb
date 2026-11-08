@@ -1,0 +1,9 @@
+[package]
+name = "probe-video-js"
+version = "0.1.0"
+kind = "js"
+entry = "main.js"
+description = "Video test. ?src= plays a source in a 640x360 shape; ?broadcast= also sends it. Tests rewrite [permissions]."
+
+[permissions]
+camera = true

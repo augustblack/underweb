@@ -1,0 +1,18 @@
+[package]
+name = "underweb-media"
+description = "Sandboxed media process: decodes one video stream into a shared frame mailbox"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "underweb-media"
+path = "src/main.rs"
+
+[dependencies]
+anyhow.workspace = true
+underweb-ipc.workspace = true
+underweb-audio.workspace = true
+underweb-sandbox.workspace = true
+gstreamer = "0.24"
+gstreamer-app = "0.24"

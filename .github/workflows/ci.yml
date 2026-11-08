@@ -23,7 +23,7 @@ jobs:
 
       - name: Native libraries (macOS)
         if: runner.os == 'macOS'
-        run: brew install cairo pango pkgconf cmake
+        run: brew install cairo pango pkgconf cmake gstreamer
 
       - name: Native libraries (Linux)
         if: runner.os == 'Linux'
@@ -31,7 +31,9 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y pkg-config libcairo2-dev libpango1.0-dev \
             libxkbcommon-dev libwayland-dev libx11-dev fonts-dejavu-core \
-            libasound2-dev cmake clang libclang-dev
+            libasound2-dev cmake clang libclang-dev \
+            libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev \
+            gstreamer1.0-plugins-base gstreamer1.0-plugins-good gstreamer1.0-libav
 
       - name: Header is up to date
         run: |

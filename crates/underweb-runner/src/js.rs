@@ -26,10 +26,12 @@ use underweb_ipc::{Channel, GuestMsg, NetEvent, NetEventKind, NetOp};
 use underweb_pkg::Package;
 
 use crate::audio::Audio;
+use crate::media::MediaCtl;
 use crate::net::Net;
 use crate::page::Page;
 use underweb_audio::pd::{self, PdMessage, PdValue};
 use underweb_audio::ugens::Wave;
+use underweb_ipc::{Broadcast, MediaCmd, MediaEvent};
 
 const API_SPECIFIER: &str = "underweb:api";
 const MAIN_SPECIFIER: &str = "underweb:main";
@@ -447,6 +449,51 @@ fn op_uw_pd_next(state: &mut OpState) -> Vec<(String, serde_json::Value)> {
         .collect()
 }
 
+// ---- video -------------------------------------------------------------
+
+type SharedMedia = Rc<MediaCtl>;
+
+#[op2(fast)]
+fn op_uw_media_open(state: &mut OpState, #[string] source: &str, looping: bool) -> u32 {
+    state.borrow::<SharedMedia>().open(source, looping, None)
+}
+#[op2(fast)]
+fn op_uw_media_broadcast(
+    state: &mut OpState,
+    #[string] source: &str,
+    #[string] url: String,
+    #[string] password: String,
+) -> u32 {
+    state
+        .borrow::<SharedMedia>()
+        .open(source, false, Some(Broadcast { url, password }))
+}
+#[op2(fast)]
+fn op_uw_media_cmd(state: &mut OpState, id: u32, #[string] cmd: &str, arg: f64) {
+    let cmd = match cmd {
+        "play" => MediaCmd::Play,
+        "pause" => MediaCmd::Pause,
+        "seek" => MediaCmd::Seek(arg),
+        _ => {
+            scene(state).video_remove(id);
+            MediaCmd::Close
+        }
+    };
+    state.borrow::<SharedMedia>().cmd(id, cmd)
+}
+/// [width, height, position, duration], or null before the first frame.
+#[op2]
+#[serde]
+fn op_uw_media_info(state: &mut OpState, id: u32) -> Option<(u32, u32, f64, f64)> {
+    scene(state)
+        .video(id)
+        .map(|v| (v.width(), v.height(), v.position(), v.duration()))
+}
+#[op2(fast)]
+fn op_uw_shape_set_video(state: &mut OpState, shape: u32, video: u32) {
+    with_shape(state, shape, |s| s.video = (video != 0).then_some(video))
+}
+
 deno_core::extension!(
     underweb,
     ops = [
@@ -463,10 +510,12 @@ deno_core::extension!(
         op_uw_audio_rate, op_uw_audio_start, op_uw_audio_stop, op_uw_audio_volume,
         op_uw_osc_new, op_uw_osc_set, op_uw_osc_free, op_uw_audio_scope,
         op_uw_pd_open, op_uw_pd_send, op_uw_pd_subscribe, op_uw_pd_next,
+        op_uw_media_open, op_uw_media_broadcast, op_uw_media_cmd, op_uw_media_info,
+        op_uw_shape_set_video,
     ],
     esm_entry_point = "ext:underweb/underweb.js",
     esm = [dir "js", "underweb.js"],
-    options = { scene: SharedScene, net: Net, data_dir: PathBuf, audio: SharedAudio },
+    options = { scene: SharedScene, net: Net, data_dir: PathBuf, audio: SharedAudio, media: SharedMedia },
     state = |state, options| {
         state.put::<SharedScene>(options.scene);
         state.put(Logs::default());
@@ -475,6 +524,7 @@ deno_core::extension!(
         state.put(DataDir(options.data_dir));
         state.put::<SharedAudio>(options.audio);
         state.put(PdInbox::default());
+        state.put::<SharedMedia>(options.media);
     },
 );
 
@@ -510,7 +560,7 @@ impl PackageLoader {
     fn load_sync(&self, specifier: &ModuleSpecifier) -> Result<ModuleSource, ModuleLoaderError> {
         if specifier.as_str() == API_SPECIFIER {
             let code = "const u = globalThis.__uw;\n\
-                        export const Layout = u.Layout, Shape = u.Shape, window = u.window, net = u.net, storage = u.storage, audio = u.audio;\n";
+                        export const Layout = u.Layout, Shape = u.Shape, window = u.window, net = u.net, storage = u.storage, audio = u.audio, video = u.video;\n";
             return Ok(ModuleSource::new(
                 ModuleType::JavaScript,
                 ModuleSourceCode::String(code.to_string().into()),
@@ -606,6 +656,7 @@ impl JsPage {
                     Net::new(chan),
                     data.to_path_buf(),
                     audio,
+                    Rc::new(MediaCtl::new(chan)),
                 )],
                 ..Default::default()
             })
@@ -646,6 +697,19 @@ impl JsPage {
         self.flush_logs();
         result.map_err(|e| anyhow!("{e}"))?;
         // settle promises from async handlers
+        let rt = &mut self.runtime;
+        self.tokio.block_on(rt.run_event_loop(Default::default()))?;
+        self.flush_logs();
+        Ok(())
+    }
+
+    /// Run a line of the runner's own JS, then settle promises.
+    fn dispatch_raw(&mut self, script: &str) -> Result<()> {
+        let result = self
+            .runtime
+            .execute_script("<underweb>", script.to_string());
+        self.flush_logs();
+        result.map_err(|e| anyhow!("{e}"))?;
         let rt = &mut self.runtime;
         self.tokio.block_on(rt.run_event_loop(Default::default()))?;
         self.flush_logs();
@@ -725,6 +789,23 @@ impl Page for JsPage {
         self.tokio.block_on(rt.run_event_loop(Default::default()))?;
         self.flush_logs();
         Ok(())
+    }
+
+    fn media(&mut self, id: u32, ev: &MediaEvent) -> Result<()> {
+        let json = match ev {
+            MediaEvent::Ready {
+                width,
+                height,
+                duration,
+                ..
+            } => {
+                serde_json::json!({ "kind": "ready", "width": width, "height": height, "duration": duration })
+            }
+            MediaEvent::Ended => serde_json::json!({ "kind": "ended" }),
+            MediaEvent::Broadcasting => serde_json::json!({ "kind": "broadcasting" }),
+            MediaEvent::Error(e) => serde_json::json!({ "kind": "error", "message": e }),
+        };
+        self.dispatch_raw(&format!("globalThis.__uw.mediaEvent({id}, {json})"))
     }
 
     fn deactivate(&mut self) {

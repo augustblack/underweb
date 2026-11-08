@@ -11,6 +11,7 @@
 //! void uw_deactivate(const UwHost *host);                // optional
 //! void uw_net(const UwHost *host, const UwNetEvent *ev); // optional, ABI 2
 //! void uw_pd(const UwHost *host, const UwPdEvent *ev);   // optional, ABI 3
+//! void uw_media(const UwHost *host, const UwMediaEvent *ev); // optional, ABI 4
 //! ```
 //!
 //! Everything the package can do goes through the function table in
@@ -21,9 +22,9 @@
 use std::ffi::{c_char, c_void};
 
 /// The ABI this header describes. Version 2 appended network and storage
-/// functions to [`UwHost`], version 3 audio; packages built for older
-/// versions still load.
-pub const UW_ABI_VERSION: u32 = 3;
+/// functions to [`UwHost`], version 3 audio, version 4 video; packages
+/// built for older versions still load.
+pub const UW_ABI_VERSION: u32 = 4;
 /// The oldest ABI the runner still accepts.
 pub const UW_ABI_MIN_VERSION: u32 = 1;
 
@@ -57,6 +58,35 @@ pub struct UwNetEvent {
     pub data: *const u8,
     pub len: usize,
     pub text: *const c_char,
+}
+
+/// [`UwMediaEvent::kind`]: frames are coming (`width`, `height`).
+pub const UW_MEDIA_READY: u32 = 0;
+pub const UW_MEDIA_ENDED: u32 = 1;
+/// A broadcast is being sent.
+pub const UW_MEDIA_BROADCASTING: u32 = 2;
+/// `text` says what went wrong (including refused permissions).
+pub const UW_MEDIA_ERROR: u32 = 3;
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct UwMediaEvent {
+    pub id: u32,
+    pub kind: u32,
+    pub width: u32,
+    pub height: u32,
+    pub text: *const c_char,
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default)]
+pub struct UwMediaInfo {
+    pub width: u32,
+    pub height: u32,
+    /// Seconds.
+    pub position: f64,
+    /// Seconds; 0 for live sources.
+    pub duration: f64,
 }
 
 /// Oscillator waves for `osc_new`.
@@ -214,6 +244,27 @@ pub struct UwHost {
         extern "C" fn(ctx: *mut c_void, receiver: *const c_char, values: *const f32, count: usize),
     /// Receive what Pd sends to `[s receiver]` in `uw_pd`.
     pub pd_subscribe: extern "C" fn(ctx: *mut c_void, receiver: *const c_char),
+
+    // ---- ABI 4: video ----
+    /// A package file, an http(s) URL, "camera", or "test:<pattern>".
+    /// Returns an id; events arrive in `uw_media`.
+    pub media_open: extern "C" fn(ctx: *mut c_void, source: *const c_char, looping: bool) -> u32,
+    /// Like `media_open`, and send it to an Icecast server
+    /// ("http://host:port/mount.ogg").
+    pub media_broadcast: extern "C" fn(
+        ctx: *mut c_void,
+        source: *const c_char,
+        url: *const c_char,
+        password: *const c_char,
+    ) -> u32,
+    pub media_play: extern "C" fn(ctx: *mut c_void, id: u32),
+    pub media_pause: extern "C" fn(ctx: *mut c_void, id: u32),
+    pub media_seek: extern "C" fn(ctx: *mut c_void, id: u32, seconds: f64),
+    pub media_close: extern "C" fn(ctx: *mut c_void, id: u32),
+    /// False until the first frame.
+    pub media_info: extern "C" fn(ctx: *mut c_void, id: u32, out: *mut UwMediaInfo) -> bool,
+    /// Show video `id` inside the shape (0: none).
+    pub shape_set_video: extern "C" fn(ctx: *mut c_void, shape: u32, video: u32),
 }
 
 pub type UwAbiVersionFn = unsafe extern "C" fn() -> u32;
@@ -225,3 +276,4 @@ pub type UwDrawFn = unsafe extern "C" fn(host: *const UwHost, cr: *mut c_void, w
 pub type UwDeactivateFn = unsafe extern "C" fn(host: *const UwHost);
 pub type UwNetFn = unsafe extern "C" fn(host: *const UwHost, ev: *const UwNetEvent);
 pub type UwPdFn = unsafe extern "C" fn(host: *const UwHost, ev: *const UwPdEvent);
+pub type UwMediaFn = unsafe extern "C" fn(host: *const UwHost, ev: *const UwMediaEvent);

@@ -9,7 +9,10 @@
 //! The scene is retained (not immediate-mode) so the host can hit-test and,
 //! later, so the layout editor can inspect and edit it.
 
+use std::cell::RefCell;
 use std::collections::HashMap;
+
+use underweb_ipc::VideoMailbox;
 
 pub use cairo;
 pub use pango;
@@ -41,6 +44,8 @@ pub struct Shape {
     pub text: Option<String>,
     pub text_color: Rgba,
     pub font: String,
+    /// A video stream shown inside the path.
+    pub video: Option<Id>,
 }
 
 impl Default for Shape {
@@ -53,6 +58,7 @@ impl Default for Shape {
             text: None,
             text_color: Rgba::BLACK,
             font: "Sans 14".into(),
+            video: None,
         }
     }
 }
@@ -63,6 +69,55 @@ const TEXT_PADDING: f64 = 10.0;
 #[derive(Debug, Default, Clone)]
 pub struct Layout {
     pub shapes: Vec<Id>,
+}
+
+/// A video stream's mailbox and the last frame turned into a surface.
+pub struct Video {
+    mailbox: VideoMailbox,
+    cache: RefCell<(u64, Option<cairo::ImageSurface>)>,
+}
+
+impl std::fmt::Debug for Video {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Video({}x{})", self.mailbox.width, self.mailbox.height)
+    }
+}
+
+impl Video {
+    /// The newest frame, copied out of the mailbox only when it changed.
+    fn surface(&self) -> Option<cairo::ImageSurface> {
+        let mut cache = self.cache.borrow_mut();
+        let frames = self.mailbox.frames();
+        if frames != cache.0 || cache.1.is_none() {
+            let mut buf = Vec::new();
+            if let Some(n) = self.mailbox.read_frame(&mut buf) {
+                let m = &self.mailbox;
+                cache.1 = cairo::ImageSurface::create_for_data(
+                    buf,
+                    cairo::Format::ARgb32,
+                    m.width as i32,
+                    m.height as i32,
+                    m.stride as i32,
+                )
+                .ok();
+                cache.0 = n;
+            }
+        }
+        cache.1.clone()
+    }
+
+    pub fn width(&self) -> u32 {
+        self.mailbox.width
+    }
+    pub fn height(&self) -> u32 {
+        self.mailbox.height
+    }
+    pub fn position(&self) -> f64 {
+        self.mailbox.position()
+    }
+    pub fn duration(&self) -> f64 {
+        self.mailbox.duration()
+    }
 }
 
 /// Everything a page has built, plus the window state it can see.
@@ -79,6 +134,7 @@ pub struct Scene {
     pub params: HashMap<String, String>,
     pub animating: bool,
     dirty: bool,
+    videos: HashMap<Id, Video>,
     /// Target for calls with unknown shape ids; never drawn.
     scratch: Shape,
 }
@@ -156,6 +212,40 @@ impl Scene {
         }
     }
 
+    // ---- video ----------------------------------------------------------
+
+    pub fn video_attach(&mut self, id: Id, mailbox: VideoMailbox) {
+        self.videos.insert(
+            id,
+            Video {
+                mailbox,
+                cache: RefCell::new((0, None)),
+            },
+        );
+        self.dirty = true;
+    }
+
+    pub fn video_remove(&mut self, id: Id) {
+        self.videos.remove(&id);
+        self.dirty = true;
+    }
+
+    pub fn video(&self, id: Id) -> Option<&Video> {
+        self.videos.get(&id)
+    }
+
+    pub fn has_videos(&self) -> bool {
+        !self.videos.is_empty()
+    }
+
+    /// Whether a video shown in a shape has a frame not drawn yet.
+    pub fn videos_changed(&self) -> bool {
+        self.videos.iter().any(|(id, v)| {
+            v.mailbox.frames() != v.cache.borrow().0
+                && self.shapes.iter().any(|s| s.video == Some(*id))
+        })
+    }
+
     // ---- rendering ------------------------------------------------------
 
     /// Draw every visible layout. The context is in logical pixels.
@@ -166,7 +256,11 @@ impl Scene {
             };
             for &s in &layout.shapes {
                 if let Some(shape) = self.shape(s) {
-                    render_shape(cr, shape);
+                    let video = shape
+                        .video
+                        .and_then(|v| self.videos.get(&v))
+                        .and_then(Video::surface);
+                    render_shape(cr, shape, video.as_ref());
                 }
             }
         }
@@ -212,13 +306,29 @@ fn set_color(cr: &cairo::Context, c: Rgba) {
     cr.set_source_rgba(c.0, c.1, c.2, c.3);
 }
 
-fn render_shape(cr: &cairo::Context, shape: &Shape) {
+fn render_shape(cr: &cairo::Context, shape: &Shape, video: Option<&cairo::ImageSurface>) {
     cr.new_path();
     append_path(cr, &shape.path);
-    let (x0, y0, x1, _y1) = cr.path_extents().unwrap_or((0.0, 0.0, 0.0, 0.0));
+    let (x0, y0, x1, y1) = cr.path_extents().unwrap_or((0.0, 0.0, 0.0, 0.0));
     if let Some(fill) = shape.fill {
         set_color(cr, fill);
         let _ = cr.fill_preserve();
+    }
+    if let Some(frame) = video {
+        // fill the shape's bounds, keeping the picture's proportions,
+        // clipped to the path (videoplayer.vala did the same)
+        let (bw, bh) = (x1 - x0, y1 - y0);
+        let (fw, fh) = (frame.width() as f64, frame.height() as f64);
+        if bw > 0.0 && bh > 0.0 && fw > 0.0 && fh > 0.0 {
+            let _ = cr.save();
+            cr.clip_preserve();
+            let s = (bw / fw).max(bh / fh);
+            cr.translate(x0 + (bw - fw * s) / 2.0, y0 + (bh - fh * s) / 2.0);
+            cr.scale(s, s);
+            let _ = cr.set_source_surface(frame, 0.0, 0.0);
+            let _ = cr.paint();
+            let _ = cr.restore();
+        }
     }
     if let Some(stroke) = shape.stroke {
         set_color(cr, stroke);

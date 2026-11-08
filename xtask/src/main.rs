@@ -15,6 +15,7 @@ const NATIVE_RUST_EXAMPLES: &[&str] = &[
     "probe-rust",
     "probe-net-rust",
     "probe-audio-rust",
+    "probe-video-rust",
 ];
 const NATIVE_C_EXAMPLES: &[&str] = &["hello-c"];
 
@@ -80,6 +81,8 @@ fn examples() -> Result<()> {
         "underweb-capi",
         "-p",
         "underweb-cli",
+        "-p",
+        "underweb-media",
     ])
     .current_dir(&root);
     for e in NATIVE_RUST_EXAMPLES {

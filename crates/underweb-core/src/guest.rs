@@ -104,14 +104,19 @@ pub struct Guest {
     buffers: Arc<Mutex<Option<Buffers>>>,
     generation: u32,
     events: Receiver<GuestEvent>,
+    /// Only the newest frame is kept: a slow consumer skips frames
+    /// instead of queueing them (each can be tens of megabytes).
+    latest: Arc<Mutex<Option<Frame>>>,
     broker: Arc<Broker>,
     sound: Arc<Sound>,
+    media: Arc<crate::media::Media>,
 }
 
-/// The package's place in the mixer.
-struct Sound {
+/// The package's place in the mixer: its own sound, and its videos'.
+pub(crate) struct Sound {
     mixer: Arc<Mixer>,
     source: Mutex<Option<Arc<Source>>>,
+    extra: Mutex<Vec<Arc<Source>>>,
     muted: std::sync::atomic::AtomicBool,
 }
 
@@ -145,6 +150,32 @@ impl Sound {
         if let Some(s) = self.source.lock().unwrap().take() {
             self.mixer.remove(s.id);
         }
+    }
+
+    fn gain(&self) -> f32 {
+        if self.muted.load(std::sync::atomic::Ordering::Relaxed) {
+            0.0
+        } else {
+            1.0
+        }
+    }
+
+    pub(crate) fn rate(&self) -> u32 {
+        self.mixer.rate
+    }
+
+    /// Another source for this package (a video's sound); muted with it.
+    pub(crate) fn add_extra(&self, ring: AudioRing) -> u64 {
+        let s = self.mixer.add(ring);
+        s.set_gain(self.gain());
+        let id = s.id;
+        self.extra.lock().unwrap().push(s);
+        id
+    }
+
+    pub(crate) fn remove_extra(&self, id: u64) {
+        self.mixer.remove(id);
+        self.extra.lock().unwrap().retain(|s| s.id != id);
     }
 }
 
@@ -206,17 +237,39 @@ impl Guest {
         let sound = Arc::new(Sound {
             mixer,
             source: Mutex::new(None),
+            extra: Mutex::new(Vec::new()),
             muted: Default::default(),
         });
+        let media = crate::media::Media::new(
+            chan.clone(),
+            broker.clone(),
+            sound.clone(),
+            &package.dir,
+            opts.sandbox,
+        );
+        let latest: Arc<Mutex<Option<Frame>>> = Arc::new(Mutex::new(None));
         {
             let chan = chan.clone();
             let buffers = buffers.clone();
             let wake = opts.wake.clone();
             let broker = broker.clone();
             let sound = sound.clone();
+            let media = media.clone();
+            let latest = latest.clone();
             std::thread::Builder::new()
                 .name(format!("guest {}", package.name()))
-                .spawn(move || read_loop(&chan, &buffers, &broker, &sound, &tx, wake.as_deref()))?;
+                .spawn(move || {
+                    read_loop(
+                        &chan,
+                        &buffers,
+                        &broker,
+                        &sound,
+                        &media,
+                        &latest,
+                        &tx,
+                        wake.as_deref(),
+                    )
+                })?;
         }
         Ok(Guest {
             package,
@@ -225,8 +278,10 @@ impl Guest {
             buffers,
             generation: 0,
             events,
+            latest,
             broker,
             sound,
+            media,
         })
     }
 
@@ -268,12 +323,28 @@ impl Guest {
     }
 
     pub fn try_event(&self) -> Option<GuestEvent> {
-        self.events.try_recv().ok()
+        self.events.try_recv().ok().map(|e| self.newest(e))
     }
 
     /// Wait up to `timeout` for the next event.
     pub fn next_event(&self, timeout: Duration) -> Option<GuestEvent> {
-        self.events.recv_timeout(timeout).ok()
+        self.events
+            .recv_timeout(timeout)
+            .ok()
+            .map(|e| self.newest(e))
+    }
+
+    /// A frame event stands for "there's a frame": hand out the newest.
+    fn newest(&self, e: GuestEvent) -> GuestEvent {
+        match e {
+            GuestEvent::Frame(_) => self
+                .latest
+                .lock()
+                .unwrap()
+                .take()
+                .map_or(e, GuestEvent::Frame),
+            e => e,
+        }
     }
 
     /// Silence (or unsilence) this package.
@@ -281,8 +352,12 @@ impl Guest {
         self.sound
             .muted
             .store(muted, std::sync::atomic::Ordering::Relaxed);
+        let gain = self.sound.gain();
         if let Some(s) = self.sound.source.lock().unwrap().as_ref() {
-            s.set_gain(if muted { 0.0 } else { 1.0 });
+            s.set_gain(gain);
+        }
+        for s in self.sound.extra.lock().unwrap().iter() {
+            s.set_gain(gain);
         }
     }
 
@@ -302,7 +377,7 @@ impl Guest {
 
     /// Whether the package has asked for sound (and not stopped).
     pub fn has_sound(&self) -> bool {
-        self.sound.source.lock().unwrap().is_some()
+        self.sound.source.lock().unwrap().is_some() || !self.sound.extra.lock().unwrap().is_empty()
     }
 
     /// Answer a [`GuestEvent::PermissionRequest`].
@@ -323,6 +398,7 @@ impl Guest {
 
     pub fn shutdown(mut self) {
         self.broker.close_all();
+        self.media.close_all();
         self.sound.stop();
         let _ = self.chan.send(&HostMsg::Shutdown, None);
         for _ in 0..50 {
@@ -339,6 +415,7 @@ impl Guest {
 impl Drop for Guest {
     fn drop(&mut self) {
         self.broker.close_all();
+        self.media.close_all();
         self.sound.stop();
         if let Ok(None) = self.child.try_wait() {
             let _ = self.chan.send(&HostMsg::Shutdown, None);
@@ -349,11 +426,14 @@ impl Drop for Guest {
     }
 }
 
+#[allow(clippy::too_many_arguments)] // the reader thread's whole world
 fn read_loop(
     chan: &Channel,
     buffers: &Mutex<Option<Buffers>>,
     broker: &Arc<Broker>,
     sound: &Sound,
+    media: &Arc<crate::media::Media>,
+    latest: &Mutex<Option<Frame>>,
     tx: &mpsc::Sender<GuestEvent>,
     wake: Option<&(dyn Fn() + Send + Sync)>,
 ) {
@@ -385,6 +465,13 @@ fn read_loop(
                 }
             }
             GuestMsg::AudioStop => sound.stop(),
+            GuestMsg::MediaOpen {
+                id,
+                source,
+                looping,
+                broadcast,
+            } => media.open(id, source, looping, broadcast),
+            GuestMsg::Media { id, cmd } => media.cmd(id, cmd),
             GuestMsg::Frame { generation, index } => {
                 let frame = {
                     let guard = buffers.lock().unwrap();
@@ -397,7 +484,21 @@ fn read_loop(
                 };
                 if let Some(frame) = frame {
                     let _ = chan.send(&HostMsg::Release { generation, index }, None);
-                    send(GuestEvent::Frame(frame));
+                    let first = {
+                        let mut slot = latest.lock().unwrap();
+                        let first = slot.is_none();
+                        *slot = Some(frame);
+                        first
+                    };
+                    if first {
+                        send(GuestEvent::Frame(Frame {
+                            width: 0,
+                            height: 0,
+                            rgba: Vec::new(),
+                        }));
+                    } else if let Some(w) = wake {
+                        w();
+                    }
                 }
             }
         }
@@ -405,6 +506,7 @@ fn read_loop(
     // the reader can't wait() on the child; report the socket closing and
     // let the owner collect the status
     broker.close_all();
+    media.close_all();
     sound.stop();
     send(GuestEvent::Exited(None));
 }

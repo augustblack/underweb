@@ -9,3 +9,4 @@ license.workspace = true
 cairo-rs.workspace = true
 pango.workspace = true
 pangocairo.workspace = true
+underweb-ipc.workspace = true

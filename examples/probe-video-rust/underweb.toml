@@ -1,0 +1,18 @@
+[package]
+name = "probe-video-rust"
+version = "0.1.0"
+kind = "rust"
+description = "Video test for native packages: shows ?src= in a shape."
+
+[targets.aarch64-apple-darwin]
+file = "dist/aarch64-apple-darwin/libprobe_video_rust.dylib"
+
+[targets.x86_64-apple-darwin]
+file = "dist/x86_64-apple-darwin/libprobe_video_rust.dylib"
+
+[targets.x86_64-unknown-linux-gnu]
+file = "dist/x86_64-unknown-linux-gnu/libprobe_video_rust.so"
+
+[targets.aarch64-unknown-linux-gnu]
+file = "dist/aarch64-unknown-linux-gnu/libprobe_video_rust.so"
+

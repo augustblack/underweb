@@ -38,6 +38,8 @@ class Shape {
   set strokeWidth(w) { ops.op_uw_shape_set_stroke_width(this.id, w); }
   set text(t) { ops.op_uw_shape_set_text(this.id, String(t)); }
   set font(f) { ops.op_uw_shape_set_font(this.id, String(f)); }
+  /** Show a video inside the shape (null to stop). */
+  set video(v) { ops.op_uw_shape_set_video(this.id, v ? v.id : 0); }
 }
 
 const window = {
@@ -243,6 +245,63 @@ function pdMessages() {
   }
 }
 
+// ---- video ----------------------------------------------------------------
+// Each stream is decoded by the browser in its own sandboxed process;
+// frames show up in any shape whose `video` is set.
+
+const videos = new Map();
+
+class Video {
+  constructor(id) {
+    this.id = id;
+    this.onready = null;        // ({width, height, duration}) => void
+    this.onended = null;
+    this.onerror = null;        // (message) => void
+    this.onbroadcasting = null;
+    videos.set(id, this);
+  }
+  play() { ops.op_uw_media_cmd(this.id, "play", 0); return this; }
+  pause() { ops.op_uw_media_cmd(this.id, "pause", 0); return this; }
+  seek(seconds) { ops.op_uw_media_cmd(this.id, "seek", seconds); return this; }
+  close() { ops.op_uw_media_cmd(this.id, "close", 0); videos.delete(this.id); }
+  #info() { return ops.op_uw_media_info(this.id); }
+  get width() { return this.#info()?.[0] ?? 0; }
+  get height() { return this.#info()?.[1] ?? 0; }
+  /** Seconds. */
+  get position() { return this.#info()?.[2] ?? 0; }
+  /** Seconds; 0 for live sources. */
+  get duration() { return this.#info()?.[3] ?? 0; }
+}
+
+const video = {
+  /**
+   * A file in the package ("clip.webm"), an http(s) URL (needs a fetch
+   * permission), "camera" (needs the camera permission), or
+   * "test:<pattern>" (smpte, ball, snow, ...).
+   */
+  open(source, { loop = false } = {}) {
+    return new Video(ops.op_uw_media_open(String(source), !!loop));
+  },
+  /**
+   * Show `source` and also send it, as Ogg Theora, to an Icecast server:
+   * url "http://host:port/mount.ogg" (needs net.tcp.connect for host:port).
+   */
+  broadcast(source, url, { password = "" } = {}) {
+    return new Video(ops.op_uw_media_broadcast(String(source), String(url), String(password)));
+  },
+};
+
+function mediaEvent(id, ev) {
+  const v = videos.get(id);
+  if (!v) return;
+  switch (ev.kind) {
+    case "ready": v.onready?.(ev); break;
+    case "ended": v.onended?.(); break;
+    case "broadcasting": v.onbroadcasting?.(); break;
+    case "error": v.onerror ? v.onerror(ev.message) : window.log("video:", ev.message); break;
+  }
+}
+
 globalThis.console = {
   log: window.log,
   info: window.log,
@@ -268,7 +327,7 @@ core.setUnhandledPromiseRejectionHandler((_promise, reason) => {
   return true;
 });
 
-const api = { Layout, Shape, window, net, storage, audio, dispatch, netEvents, pdMessages };
+const api = { Layout, Shape, window, net, storage, audio, video, dispatch, netEvents, pdMessages, mediaEvent };
 Object.defineProperty(globalThis, "__uw", { value: api });
 
 // Packages get no Deno internals: only the API above.

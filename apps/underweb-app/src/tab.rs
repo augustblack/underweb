@@ -263,7 +263,14 @@ impl Tab {
         let Some(guest) = self.guest.as_mut() else {
             return;
         };
-        while let Some(ev) = guest.try_event() {
+        // a busy page (video) never runs out of events: handle what's
+        // there, at most one frame, and leave the rest for the next repaint
+        let mut handled = 0;
+        let mut got_frame = false;
+        while handled < 256 && !got_frame {
+            let Some(ev) = guest.try_event() else { break };
+            handled += 1;
+            got_frame = matches!(ev, GuestEvent::Frame(_));
             match ev {
                 GuestEvent::Started { sandboxed } => self.status = Status::Running { sandboxed },
                 GuestEvent::Title(t) => self.title = t,
@@ -307,6 +314,9 @@ impl Tab {
                     self.animating = false;
                 }
             }
+        }
+        if got_frame || handled == 256 {
+            ctx.request_repaint(); // more may be waiting
         }
     }
 

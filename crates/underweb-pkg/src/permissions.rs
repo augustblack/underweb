@@ -7,6 +7,7 @@
 //! net.udp.bind    = [57120]                     # receive UDP on this port
 //! net.udp.send    = ["192.168.1.20:57110", "*:9000"]
 //! fetch           = ["https://api.example.org/v1/"]   # URL prefixes
+//! camera          = true
 //! ```
 //!
 //! Declaring is necessary but not sufficient: the user (or, from phase 4,
@@ -24,6 +25,8 @@ pub struct Permissions {
     pub net: Net,
     #[serde(default)]
     pub fetch: Vec<String>,
+    #[serde(default)]
+    pub camera: bool,
 }
 
 #[derive(Debug, Clone, Default, Deserialize, PartialEq, Eq)]
@@ -61,6 +64,7 @@ pub enum Permission {
     UdpBind(u16),
     UdpSend(String),
     Fetch(String),
+    Camera,
 }
 
 impl Permission {
@@ -72,6 +76,7 @@ impl Permission {
             Permission::UdpBind(p) => format!("net.udp.bind {p}"),
             Permission::UdpSend(p) => format!("net.udp.send {p}"),
             Permission::Fetch(p) => format!("fetch {p}"),
+            Permission::Camera => "camera".into(),
         }
     }
 
@@ -97,6 +102,7 @@ impl Permission {
             Permission::UdpBind(p) => format!("receive UDP messages from your network on port {p}"),
             Permission::UdpSend(p) => format!("send UDP messages to {}", endpoint(p)),
             Permission::Fetch(p) => format!("load data from {p}"),
+            Permission::Camera => "use your camera".into(),
         }
     }
 }
@@ -142,6 +148,9 @@ impl Permissions {
         v.extend(self.net.udp.bind.iter().copied().map(Permission::UdpBind));
         v.extend(self.net.udp.send.iter().cloned().map(Permission::UdpSend));
         v.extend(self.fetch.iter().cloned().map(Permission::Fetch));
+        if self.camera {
+            v.push(Permission::Camera);
+        }
         v
     }
 
@@ -183,6 +192,10 @@ impl Permissions {
             .iter()
             .find(|p| endpoint_matches(p, host, port))
             .map(|p| Permission::UdpSend(p.clone()))
+    }
+
+    pub fn camera(&self) -> Option<Permission> {
+        self.camera.then_some(Permission::Camera)
     }
 
     pub fn fetch(&self, url: &str) -> Option<Permission> {
@@ -304,6 +317,6 @@ mod tests {
             let p: Permissions = toml::from_str(bad).unwrap();
             assert!(p.validate().is_err(), "{bad}");
         }
-        assert!(toml::from_str::<Permissions>("camera = true").is_err());
+        assert!(toml::from_str::<Permissions>("microphone = true").is_err());
     }
 }

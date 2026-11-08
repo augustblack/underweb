@@ -127,9 +127,13 @@ impl Grants {
     }
 }
 
+/// What to do once the permission is decided: `Ok` to go ahead, `Err`
+/// with the reason it was refused.
+pub(crate) type Then = Box<dyn FnOnce(Result<(), String>) + Send>;
+
 struct Pending {
     permission: Permission,
-    ops: Vec<(u32, NetOp)>,
+    waiting: Vec<Then>,
 }
 
 pub(crate) struct Broker {
@@ -239,20 +243,31 @@ impl Broker {
                 ),
             ));
         };
+        let b = self.clone();
+        self.gate(
+            permission,
+            Box::new(move |r| match r {
+                Ok(()) => b.perform(handle, op),
+                Err(e) => b.reply(NetEvent::error(handle, e)),
+            }),
+        );
+    }
+
+    /// Run `then` once `permission` is granted (at once, after asking the
+    /// user, or never: then it gets the refusal).
+    pub(crate) fn gate(self: &Arc<Self>, permission: Permission, then: Then) {
         let key = permission.key();
         let state = self.grants.lock().unwrap().state(&key);
         match (state, self.policy) {
             (GrantState::AllowedOnce | GrantState::AllowedAlways, _)
-            | (GrantState::Undecided, PermissionPolicy::AllowDeclared) => self.perform(handle, op),
-            (GrantState::Denied, _) | (GrantState::Undecided, PermissionPolicy::DenyAll) => self
-                .reply(NetEvent::error(
-                    handle,
-                    format!("permission denied: {}", permission.describe()),
-                )),
+            | (GrantState::Undecided, PermissionPolicy::AllowDeclared) => then(Ok(())),
+            (GrantState::Denied, _) | (GrantState::Undecided, PermissionPolicy::DenyAll) => {
+                then(Err(format!("permission denied: {}", permission.describe())))
+            }
             (GrantState::Undecided, PermissionPolicy::Ask) => {
                 let mut pending = self.pending.lock().unwrap();
                 if let Some(p) = pending.values_mut().find(|p| p.permission == permission) {
-                    p.ops.push((handle, op)); // already asking
+                    p.waiting.push(then); // already asking
                     return;
                 }
                 let id = self.next_prompt.fetch_add(1, Ordering::Relaxed);
@@ -261,7 +276,7 @@ impl Broker {
                     id,
                     Pending {
                         permission: permission.clone(),
-                        ops: vec![(handle, op)],
+                        waiting: vec![then],
                     },
                 );
                 drop(pending);
@@ -295,16 +310,21 @@ impl Broker {
                 }
             }
         }
-        for (handle, op) in p.ops {
+        for then in p.waiting {
             if decision == Decision::Deny {
-                self.reply(NetEvent::error(
-                    handle,
-                    format!("permission denied: {}", p.permission.describe()),
-                ));
+                then(Err(format!(
+                    "permission denied: {}",
+                    p.permission.describe()
+                )));
             } else {
-                self.perform(handle, op);
+                then(Ok(()));
             }
         }
+    }
+
+    /// The package's declared permissions.
+    pub(crate) fn declared(&self) -> &Permissions {
+        &self.perms
     }
 
     fn perform(self: &Arc<Self>, handle: u32, op: NetOp) {

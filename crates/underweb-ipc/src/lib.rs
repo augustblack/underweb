@@ -13,9 +13,11 @@
 //! [`HostMsg::Release`].
 
 mod channel;
+mod media;
 mod shm;
 
 pub use channel::Channel;
+pub use media::{Broadcast, FromMedia, MAX_PIXELS, MediaCmd, MediaEvent, ToMedia, VideoMailbox};
 pub use shm::Shm;
 
 use serde::{Deserialize, Serialize};
@@ -49,6 +51,11 @@ pub enum HostMsg {
     },
     /// Network: a reply or incoming data for a handle.
     Net(NetEvent),
+    /// About media stream `id`; `Ready` carries the frame mailbox fd.
+    Media {
+        id: u32,
+        event: MediaEvent,
+    },
     /// Answer to `GuestMsg::AudioStart`: carries the shared-memory audio
     /// ring (`capacity` stereo frames) the browser plays from.
     AudioReady {
@@ -89,6 +96,18 @@ pub enum GuestMsg {
     /// The package wants to make sound.
     AudioStart,
     AudioStop,
+    /// Open media stream `id`: a package file, an http(s) URL, `camera`,
+    /// or `test:<pattern>`; optionally broadcast it.
+    MediaOpen {
+        id: u32,
+        source: String,
+        looping: bool,
+        broadcast: Option<Broadcast>,
+    },
+    Media {
+        id: u32,
+        cmd: MediaCmd,
+    },
 }
 
 /// What a package asks the host to do. The host checks each against the

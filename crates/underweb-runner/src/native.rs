@@ -13,10 +13,12 @@ use underweb_guest::{PathOp, Rgba, Scene, Shape, cairo};
 use underweb_ipc::{Channel, GuestMsg, NetEvent, NetEventKind, NetOp};
 
 use crate::audio::Audio;
+use crate::media::MediaCtl;
 use crate::net::{Net, parse_headers};
 use crate::page::Page;
 use underweb_audio::pd::{self, PdMessage, PdValue};
 use underweb_audio::ugens::Wave;
+use underweb_ipc::{Broadcast, MediaCmd, MediaEvent};
 
 struct Ctx {
     scene: Rc<RefCell<Scene>>,
@@ -27,6 +29,7 @@ struct Ctx {
     net: Net,
     data_dir: CString,
     audio: Rc<Audio>,
+    media: MediaCtl,
 }
 
 pub struct NativePage {
@@ -39,6 +42,7 @@ pub struct NativePage {
     deactivate: Option<UwDeactivateFn>,
     net: Option<UwNetFn>,
     pd: Option<UwPdFn>,
+    media: Option<UwMediaFn>,
     // last: unloading must happen after everything above
     _lib: Library,
 }
@@ -72,6 +76,7 @@ impl NativePage {
                 .map(|s| *s);
             let net = lib.get::<UwNetFn>(b"uw_net\0").ok().map(|s| *s);
             let pd = lib.get::<UwPdFn>(b"uw_pd\0").ok().map(|s| *s);
+            let media = lib.get::<UwMediaFn>(b"uw_media\0").ok().map(|s| *s);
 
             let mut ctx = Box::new(Ctx {
                 scene,
@@ -80,6 +85,7 @@ impl NativePage {
                 net: Net::new(chan),
                 data_dir: CString::new(data.to_string_lossy().as_bytes())?,
                 audio,
+                media: MediaCtl::new(chan),
             });
             let host = Box::new(host_table(&mut *ctx as *mut Ctx as *mut c_void));
             Ok(NativePage {
@@ -92,6 +98,7 @@ impl NativePage {
                 deactivate,
                 net,
                 pd,
+                media,
                 _lib: lib,
             })
         }
@@ -136,6 +143,28 @@ impl Page for NativePage {
             status: ev.status,
             data: ev.data.as_ptr(),
             len: ev.data.len(),
+            text: text.as_ptr(),
+        };
+        unsafe { f(&*self.host, &raw) };
+        Ok(())
+    }
+
+    fn media(&mut self, id: u32, ev: &MediaEvent) -> Result<()> {
+        let Some(f) = self.media else { return Ok(()) };
+        let (kind, width, height, text) = match ev {
+            MediaEvent::Ready { width, height, .. } => {
+                (UW_MEDIA_READY, *width, *height, String::new())
+            }
+            MediaEvent::Ended => (UW_MEDIA_ENDED, 0, 0, String::new()),
+            MediaEvent::Broadcasting => (UW_MEDIA_BROADCASTING, 0, 0, String::new()),
+            MediaEvent::Error(e) => (UW_MEDIA_ERROR, 0, 0, e.clone()),
+        };
+        let text = CString::new(text.replace('\0', "")).unwrap_or_default();
+        let raw = UwMediaEvent {
+            id,
+            kind,
+            width,
+            height,
             text: text.as_ptr(),
         };
         unsafe { f(&*self.host, &raw) };
@@ -495,6 +524,60 @@ extern "C" fn pd_subscribe(p: *mut c_void, r: *const c_char) {
     log_err(p, pd::subscribe(&string(r)));
 }
 
+// ---- video ----
+
+extern "C" fn media_open(p: *mut c_void, source: *const c_char, looping: bool) -> u32 {
+    ctx(p).media.open(&string(source), looping, None)
+}
+extern "C" fn media_broadcast(
+    p: *mut c_void,
+    source: *const c_char,
+    url: *const c_char,
+    password: *const c_char,
+) -> u32 {
+    ctx(p).media.open(
+        &string(source),
+        false,
+        Some(Broadcast {
+            url: string(url),
+            password: string(password),
+        }),
+    )
+}
+extern "C" fn media_play(p: *mut c_void, id: u32) {
+    ctx(p).media.cmd(id, MediaCmd::Play)
+}
+extern "C" fn media_pause(p: *mut c_void, id: u32) {
+    ctx(p).media.cmd(id, MediaCmd::Pause)
+}
+extern "C" fn media_seek(p: *mut c_void, id: u32, seconds: f64) {
+    ctx(p).media.cmd(id, MediaCmd::Seek(seconds))
+}
+extern "C" fn media_close(p: *mut c_void, id: u32) {
+    with_scene(p, |s| s.video_remove(id));
+    ctx(p).media.cmd(id, MediaCmd::Close)
+}
+extern "C" fn media_info(p: *mut c_void, id: u32, out: *mut UwMediaInfo) -> bool {
+    let Ok(scene) = ctx(p).scene.try_borrow() else {
+        return false;
+    };
+    let (Some(v), false) = (scene.video(id), out.is_null()) else {
+        return false;
+    };
+    unsafe {
+        *out = UwMediaInfo {
+            width: v.width(),
+            height: v.height(),
+            position: v.position(),
+            duration: v.duration(),
+        }
+    };
+    true
+}
+extern "C" fn shape_set_video(p: *mut c_void, shape_id: u32, video: u32) {
+    shape(p, shape_id, |s| s.video = (video != 0).then_some(video))
+}
+
 fn host_table(ctx: *mut c_void) -> UwHost {
     UwHost {
         abi_version: UW_ABI_VERSION,
@@ -545,5 +628,13 @@ fn host_table(ctx: *mut c_void) -> UwHost {
         pd_symbol,
         pd_list,
         pd_subscribe,
+        media_open,
+        media_broadcast,
+        media_play,
+        media_pause,
+        media_seek,
+        media_close,
+        media_info,
+        shape_set_video,
     }
 }

@@ -1,0 +1,6 @@
+[package]
+name = "hello-video"
+version = "0.1.0"
+kind = "js"
+entry = "main.js"
+description = "demos/07videoplay, ported: video inside a rectangle and a curved shape. Click to pause."

@@ -8,6 +8,7 @@ members = [
     "examples/probe-rust",
     "examples/probe-net-rust",
     "examples/probe-audio-rust",
+    "examples/probe-video-rust",
 ]
 
 [workspace.package]
@@ -25,6 +26,7 @@ underweb-pkg = { path = "crates/underweb-pkg" }
 underweb-core = { path = "crates/underweb-core" }
 underweb-capi = { path = "crates/underweb-capi" }
 underweb-audio = { path = "crates/underweb-audio" }
+underweb-media = { path = "crates/underweb-media" }
 
 anyhow = "1"
 serde = { version = "1", features = ["derive"] }
@@ -42,3 +44,18 @@ debug = "line-tables-only"
 
 [profile.dev.package."*"]
 debug = false
+
+# these move pixels and samples around; unoptimised they can't keep up
+# with video even in development builds
+[profile.dev.package.underweb-core]
+opt-level = 2
+[profile.dev.package.underweb-guest]
+opt-level = 2
+[profile.dev.package.underweb-ipc]
+opt-level = 2
+[profile.dev.package.underweb-audio]
+opt-level = 2
+[profile.dev.package.underweb-media]
+opt-level = 2
+[profile.dev.package.underweb-app]
+opt-level = 2

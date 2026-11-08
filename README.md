@@ -8,7 +8,7 @@ sandboxed process.
 This is a Rust rewrite of the 2011 Vala project. See
 [docs/ROADMAP.md](docs/ROADMAP.md) for the design and phases.
 
-## Status: phases 0–4 and 6
+## Status: phases 0–4, 6 and 7
 
 Working on macOS:
 
@@ -54,12 +54,14 @@ site serving its index.
 
 ## Build and run
 
-Needs Rust ≥ 1.91, cairo, pango, and cmake (to build libpd):
+Needs Rust ≥ 1.91, cairo, pango, GStreamer, and cmake (to build libpd):
 
 ```sh
-brew install cairo pango pkgconf cmake                   # macOS
+brew install cairo pango pkgconf cmake gstreamer         # macOS
 sudo apt install libcairo2-dev libpango1.0-dev pkg-config cmake clang \
-  libclang-dev libasound2-dev libxkbcommon-dev libwayland-dev   # Debian/Ubuntu
+  libclang-dev libasound2-dev libxkbcommon-dev libwayland-dev \
+  libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev \
+  gstreamer1.0-plugins-good gstreamer1.0-libav            # Debian/Ubuntu
 
 cargo xtask examples          # builds the runner and the native example packages
 cargo run -p underweb-app -- hello-js hello-ts hello-rust hello-c
@@ -175,6 +177,17 @@ audio.pd.onmessage = (receiver, value) => { /* … */ };
 const samples = audio.scope(512);  // what's playing, for drawing
 ```
 
+Video goes in shapes:
+
+```js
+import { Shape, video } from "underweb";
+const clip = video.open("clip.webm", { loop: true }).play();  // or "https://…", "camera", "test:ball"
+shape.video = clip;                                          // clipped to the shape's path
+clip.onready = ({ width, height }) => { /* … */ };
+video.broadcast("camera", "http://icecast.example.org:8000/live.ogg", { password: "…" });
+```
+
+`examples/hello-video` is the 2011 07videoplay demo, ported.
 `examples/hello-audio` and `examples/hello-pd` are the 2011 audio and Pure
 Data demos, ported (hello-pd uses the original `440.pd`).
 `examples/hello-net` asks to fetch from GitHub. `--allow-declared` grants
@@ -198,6 +211,7 @@ See `examples/` for the same idea in Rust (the `underweb` crate and
 | `crates/underweb-pkg` | `underweb.toml`, archives, release indexes, addresses, publishing |
 | `crates/underweb-cli` | `uw`, the authoring tool |
 | `crates/underweb-capi` | the engine as a C library |
+| `crates/underweb-media` | the media process: one sandboxed GStreamer pipeline per video stream |
 | `crates/underweb-audio` | the audio ring, oscillators, the engine with Pure Data, and the browser's mixer |
 | `crates/underweb-trust` | signed statements, keys, the trust store and policy, signed lists |
 | `crates/underweb-trust-atproto` | Bluesky/ATProto: identities, keys, statements, follows |

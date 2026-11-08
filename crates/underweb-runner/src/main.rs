@@ -12,6 +12,7 @@
 mod audio;
 mod build;
 mod js;
+mod media;
 mod native;
 mod net;
 mod page;

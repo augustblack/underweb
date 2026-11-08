@@ -18,6 +18,7 @@
 mod audio;
 mod broker;
 mod guest;
+mod media;
 mod paths;
 mod store;
 mod trust;
@@ -25,6 +26,7 @@ mod trust;
 pub use audio::default_mixer;
 pub use broker::{Decision, GrantState, PermissionPolicy};
 pub use guest::{Frame, Guest, GuestEvent, SpawnOptions};
+pub use media::media_path;
 pub use paths::{data_dir, runner_path};
 pub use store::{Origin, Resolved, Store, Subject};
 pub use trust::{DomainAdapter, Trust, sign_release};

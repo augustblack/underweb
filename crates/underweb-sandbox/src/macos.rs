@@ -35,6 +35,9 @@ pub fn profile(policy: &Policy) -> String {
        (global-name "com.apple.logd")
        (global-name "com.apple.system.logger"))
 (allow user-preference-read)
+; anonymous shared memory for frames (named /uw.*, unlinked at once)
+(allow ipc-posix-shm-read* ipc-posix-shm-write-create ipc-posix-shm-write-data ipc-posix-shm-write-unlink
+       (ipc-posix-name-prefix "/uw."))
 "#,
     );
     if policy.allow_exec {

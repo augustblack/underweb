@@ -7,7 +7,7 @@ use underweb_abi::UwPointerEvent;
 use underweb_audio::pd::PdMessage;
 use underweb_audio::{AudioRing, pd};
 use underweb_guest::{Scene, cairo};
-use underweb_ipc::{Channel, GuestMsg, HostMsg, NetEvent, Shm};
+use underweb_ipc::{Channel, GuestMsg, HostMsg, MediaEvent, NetEvent, Shm, VideoMailbox};
 
 use crate::audio::Audio;
 
@@ -18,6 +18,8 @@ pub trait Page {
     fn pointer(&mut self, ev: &UwPointerEvent) -> Result<()>;
     /// A network event for one of the package's handles.
     fn net(&mut self, ev: NetEvent) -> Result<()>;
+    /// Something happened to video stream `id`.
+    fn media(&mut self, id: u32, ev: &MediaEvent) -> Result<()>;
     /// Messages Pd sent to receivers the page subscribed to.
     fn pd(&mut self, msgs: Vec<PdMessage>) -> Result<()>;
     /// Raw cairo drawing on top of the scene (native packages only).
@@ -59,6 +61,11 @@ pub fn run(
                 chan.send(&GuestMsg::Animating(animating), None)?;
             }
         }
+        // a new video frame means a new page frame
+        let new_video_frame = scene.borrow().videos_changed();
+        if new_video_frame {
+            scene.borrow_mut().request_redraw();
+        }
         draw_if_needed(chan, scene, page, frames.as_mut())?;
 
         // while sound runs, look for Pd's messages every 20 ms
@@ -71,7 +78,9 @@ pub fn run(
             page.pd(msgs).context("pd")?;
             continue;
         }
-        if audio.active() && !chan.readable(20)? {
+        // with sound or video running, wake up regularly
+        let videos = scene.borrow().has_videos();
+        if (audio.active() || videos) && !chan.readable(if videos { 8 } else { 20 })? {
             continue;
         }
 
@@ -120,6 +129,14 @@ pub fn run(
                 }
             }
             HostMsg::Net(ev) => page.net(ev).context("net")?,
+            HostMsg::Media { id, event } => {
+                if let (MediaEvent::Ready { width, height, .. }, Some(fd)) = (&event, fd) {
+                    scene
+                        .borrow_mut()
+                        .video_attach(id, VideoMailbox::open(fd, *width, *height)?);
+                }
+                page.media(id, &event).context("media")?;
+            }
             HostMsg::AudioReady { capacity } => {
                 let fd = fd.context("AudioReady without a ring")?;
                 let shm = Shm::from_fd(fd, AudioRing::bytes_for(capacity as usize))?;
