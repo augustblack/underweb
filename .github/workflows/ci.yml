@@ -36,5 +36,27 @@ jobs:
           # runners print their start-up steps (Windows is only seen here)
           UNDERWEB_TRACE: ${{ runner.os == 'Windows' && '1' || '' }}
 
+      # Where a sandboxed JS runner hangs on Windows: start the hello_js
+      # test, wait, and print every thread's stack with the debugger the
+      # Windows SDK installs (symbols come from target\debug).
+      - name: Stacks of a hanging JS runner (Windows)
+        if: always() && runner.os == 'Windows'
+        continue-on-error: true
+        shell: pwsh
+        run: |
+          $cdb = "C:\Program Files (x86)\Windows Kits\10\Debuggers\x64\cdb.exe"
+          if (-not (Test-Path $cdb)) { Write-Output "no cdb.exe"; exit 0 }
+          $env:UNDERWEB_TRACE = "1"
+          $test = Start-Process cargo -PassThru -NoNewWindow -ArgumentList `
+            "test", "-p", "underweb-core", "--test", "packages", "--", "--exact", "hello_js"
+          Start-Sleep -Seconds 12
+          foreach ($p in Get-Process underweb-runner -ErrorAction SilentlyContinue) {
+            Write-Output "===== underweb-runner $($p.Id)"
+            & $cdb -p $p.Id -c ".symfix+ C:\symbols; .reload; ~*kn 40; qd" 2>&1 |
+              Select-String -NotMatch "^(\*|Symbol search path|Executable search path|ModLoad)"
+          }
+          Stop-Process -Id $test.Id -ErrorAction SilentlyContinue
+          Get-Process underweb-runner -ErrorAction SilentlyContinue | Stop-Process
+
       - name: Clippy
         run: cargo clippy --workspace --all-targets -- -D warnings

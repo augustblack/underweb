@@ -1125,27 +1125,33 @@ mod tests {
         let tool = dir.join("tool.exe");
         // a copy of cmd.exe, which needs no language files beside it
         std::fs::copy(system32.join("cmd.exe"), &tool).unwrap();
-        let mut l = Launch::new(system32.join("cmd.exe"));
-        l.arg("/C").arg(format!("{} /C exit 0", tool.display()));
-        l.pipe_stderr = true;
-        l.container = Some(Container {
-            name: "underweb-sandbox-exec-test".into(),
-            policy: Policy {
-                read_only: vec![dir.clone()],
-                read_write: vec![],
-                allow_exec: true,
-            },
-            capabilities: vec![],
-        });
-        let mut p = l.spawn().expect("starting cmd.exe in a container");
-        let mut out = String::new();
-        p.take_stderr().unwrap().read_to_string(&mut out).unwrap();
-        let code = p.wait().unwrap().code();
+        let run = |child: &Path| -> (Option<i32>, String) {
+            let mut l = Launch::new(system32.join("cmd.exe"));
+            l.arg("/C").arg(format!("{} /C exit 0", child.display()));
+            l.pipe_stderr = true;
+            l.container = Some(Container {
+                name: "underweb-sandbox-exec-test".into(),
+                policy: Policy {
+                    read_only: vec![dir.clone()],
+                    read_write: vec![],
+                    allow_exec: true,
+                },
+                capabilities: vec![],
+            });
+            let mut p = l.spawn().expect("starting cmd.exe in a container");
+            let mut out = String::new();
+            p.take_stderr().unwrap().read_to_string(&mut out).unwrap();
+            (p.wait().unwrap().code(), out)
+        };
+        // Windows' own cmd.exe first: if that fails too, starting any
+        // program from a container fails, whatever folder it is in
+        let system = run(&system32.join("cmd.exe"));
+        let ours = run(&tool);
         let _ = std::fs::remove_dir_all(&dir);
         assert_eq!(
-            code,
-            Some(0),
-            "running {} in the container: {out}",
+            (system.0, ours.0),
+            (Some(0), Some(0)),
+            "System32 cmd.exe: {system:?}; {} : {ours:?}",
             tool.display()
         );
     }
