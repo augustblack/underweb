@@ -715,19 +715,21 @@ impl JsPage {
             .enable_time()
             .build()?;
         crate::trace("tokio ready");
+        let extension = underweb::init(
+            scene,
+            Net::new(chan),
+            data.to_path_buf(),
+            audio,
+            Rc::new(MediaCtl::new(chan)),
+        );
+        crate::trace("extension ready");
         let runtime = {
             let _context = tokio.enter();
             JsRuntime::new(RuntimeOptions {
                 module_loader: Some(Rc::new(PackageLoader {
                     root: pkg.dir.clone(),
                 })),
-                extensions: vec![underweb::init(
-                    scene,
-                    Net::new(chan),
-                    data.to_path_buf(),
-                    audio,
-                    Rc::new(MediaCtl::new(chan)),
-                )],
+                extensions: vec![extension],
                 ..Default::default()
             })
         };

@@ -139,6 +139,16 @@ fn probe(r: &Run, name: &str) -> String {
         .to_string()
 }
 
+/// The control for the JS tests: V8 and the page work at all here,
+/// without the sandbox in the way.
+#[test]
+fn js_runs_without_the_sandbox() {
+    let r = run("hello-js", false, &[], has_frame);
+    assert!(r.errors.is_empty(), "{:?}", r.errors);
+    assert_eq!(r.sandboxed, Some(false));
+    assert!(r.frame.is_some(), "no frame; logs {:?}", r.logs);
+}
+
 #[test]
 fn hello_js() {
     let r = run("hello-js", true, &[], has_frame);

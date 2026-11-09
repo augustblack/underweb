@@ -830,6 +830,16 @@ pub fn spawn(l: &Launch) -> Result<Process> {
         .map_or(std::ptr::null_mut(), |h| h.as_raw_handle());
     si.lpAttributeList = list;
 
+    // A container starts in a folder it may open: Windows opens the
+    // current directory again for every process it creates, so with one
+    // it can't (the parent's), it can start no programs at all.
+    let cwd = l.container.as_ref().and_then(|c| {
+        c.policy
+            .read_write
+            .first()
+            .or(c.policy.read_only.first())
+            .map(wide)
+    });
     let app = wide(&l.program);
     let mut cmdline = command_line(l);
     let env = environment(l);
@@ -851,7 +861,7 @@ pub fn spawn(l: &Launch) -> Result<Process> {
             (!inherit.is_empty()) as i32,
             EXTENDED_STARTUPINFO_PRESENT | CREATE_SUSPENDED | CREATE_UNICODE_ENVIRONMENT | console,
             env.as_ptr().cast(),
-            std::ptr::null(),
+            cwd.as_ref().map_or(std::ptr::null(), |w| w.as_ptr()),
             &si.StartupInfo,
             &mut pi,
         )
