@@ -43,6 +43,10 @@ pub struct Policy {
     /// Allow starting programs (the source builder runs compilers). They
     /// inherit the same restrictions. Package runners never get this.
     pub allow_exec: bool,
+    /// The camera is in use (the media service, for a `camera` source the
+    /// user permitted). On Windows the container gets the webcam
+    /// capability; on macOS the camera is opened before lockdown instead.
+    pub camera: bool,
 }
 
 impl Policy {
@@ -62,6 +66,7 @@ impl Policy {
             read_only: canon(&self.read_only)?,
             read_write: canon(&self.read_write)?,
             allow_exec: self.allow_exec,
+            camera: self.camera,
         })
     }
 }

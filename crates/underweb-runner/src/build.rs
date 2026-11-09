@@ -86,6 +86,7 @@ fn run(args: impl Iterator<Item = String>) -> Result<PathBuf> {
             read_only,
             read_write,
             allow_exec: true,
+            camera: false,
         })?;
         eprintln!("sandboxed build of {} {}", pkg.name(), pkg.version());
     }

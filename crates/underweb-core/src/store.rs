@@ -300,6 +300,7 @@ impl Store {
             read_only: vec![self.sdk.clone()],
             read_write: vec![pkg.dir.clone(), work.clone()],
             allow_exec: true,
+            camera: false,
         };
         if !self.sandbox {
             cmd.arg("--no-sandbox");

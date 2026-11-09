@@ -69,6 +69,7 @@ export function resize(w, h) {
 function showPreview() {
   preview = video.open(source).play();
   preview.onerror = (m) => say(`No picture from ${source}: ${m}`);
+  preview.onready = (i) => window.log(`preview ${i.width}x${i.height}`);
   view.video = preview;
 }
 

@@ -213,6 +213,17 @@ fn run(args: &Args, chan: Arc<Channel>) -> Result<()> {
         }
     }
 
+    // The camera is opened before lockdown: macOS loads camera drivers
+    // only into an unsandboxed process (or one signed with the camera
+    // entitlement), and its frames come from the device, not from data
+    // that needs the sandbox around its parsing.
+    let camera = args.source == "camera";
+    if camera {
+        pipeline
+            .set_state(gst::State::Paused)
+            .context("opening the camera")?;
+    }
+
     // Everything that needs broad file access is loaded; lock down before
     // the first byte of media is parsed.
     if args.sandbox {
@@ -221,9 +232,13 @@ fn run(args: &Args, chan: Arc<Channel>) -> Result<()> {
             read_only,
             read_write: vec![],
             allow_exec: false,
+            // the broker has checked the camera permission
+            camera,
         })?;
     }
-    pipeline.set_state(gst::State::Paused)?;
+    if !camera {
+        pipeline.set_state(gst::State::Paused)?;
+    }
 
     // bus: end of stream, errors
     {

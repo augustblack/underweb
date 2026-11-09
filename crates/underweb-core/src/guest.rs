@@ -221,6 +221,7 @@ impl Guest {
                     read_only: vec![package.dir.clone()],
                     read_write: vec![data.clone()],
                     allow_exec: false,
+                    camera: false,
                 },
                 capabilities: vec![],
             });

@@ -49,6 +49,10 @@ pub fn profile(policy: &Policy) -> String {
             "(allow file-read* file-write* (literal \"/dev/tty\") (regex #\"^/dev/fd/\"))\n",
         );
     }
+    // policy.camera needs nothing here: the media service opens the
+    // camera before it locks down (macOS loads camera drivers only into
+    // unsandboxed or camera-entitled processes), and capture then runs on
+    // the connections it already has
     let sys = system_read_paths(policy.allow_exec);
     let _ = writeln!(p, "(allow file-read* file-map-executable");
     for d in sys

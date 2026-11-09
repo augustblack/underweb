@@ -120,6 +120,7 @@ fn run(chan: &Channel, args: Args) -> Result<()> {
                 read_only: vec![pkg.dir.clone()],
                 read_write: vec![args.data.clone()],
                 allow_exec: false,
+                camera: false,
             })?;
         }
         chan.send(

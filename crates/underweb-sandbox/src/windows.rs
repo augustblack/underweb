@@ -1091,6 +1091,7 @@ mod tests {
                     read_only: vec![inside.clone()],
                     read_write: vec![],
                     allow_exec: false,
+                    camera: false,
                 },
                 capabilities: vec![],
             });
@@ -1135,6 +1136,7 @@ mod tests {
                     read_only: vec![dir.clone()],
                     read_write: vec![],
                     allow_exec: true,
+                    camera: false,
                 },
                 capabilities: vec![],
             });

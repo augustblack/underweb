@@ -238,6 +238,7 @@ impl Media {
                         .collect(),
                     read_write: vec![registry],
                     allow_exec: false,
+                    camera: matches!(src, Source::Camera),
                 },
                 capabilities: if matches!(src, Source::Camera) {
                     vec!["webcam".into()]
