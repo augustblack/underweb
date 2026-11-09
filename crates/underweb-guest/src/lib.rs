@@ -42,6 +42,117 @@ pub struct Shape {
     pub image: Option<Id>,
     /// A video stream shown inside the path.
     pub video: Option<Id>,
+    /// How the video is shown.
+    pub video_filter: VideoFilter,
+}
+
+/// A picture effect on a shape's video (`UW_FILTER_*`).
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub enum VideoFilter {
+    #[default]
+    None,
+    Grayscale,
+    Invert,
+    /// Blocks of this many pixels (of the video).
+    Pixelate(u32),
+    /// This many levels per colour channel.
+    Posterize(u32),
+}
+
+impl VideoFilter {
+    /// From a `UW_FILTER_*` and its amount (0 for the default).
+    pub fn from_abi(kind: u32, amount: f64) -> VideoFilter {
+        let n = |default: u32| {
+            if amount >= 1.0 {
+                (amount as u32).clamp(2, 256)
+            } else {
+                default
+            }
+        };
+        match kind {
+            underweb_abi::UW_FILTER_GRAYSCALE => VideoFilter::Grayscale,
+            underweb_abi::UW_FILTER_INVERT => VideoFilter::Invert,
+            underweb_abi::UW_FILTER_PIXELATE => VideoFilter::Pixelate(n(12)),
+            underweb_abi::UW_FILTER_POSTERIZE => VideoFilter::Posterize(n(4)),
+            _ => VideoFilter::None,
+        }
+    }
+
+    /// A filtered copy of `frame`, or `None` to show it as it is.
+    pub fn apply(self, frame: &cairo::ImageSurface) -> Option<cairo::ImageSurface> {
+        if self == VideoFilter::None {
+            return None;
+        }
+        let (w, h) = (frame.width(), frame.height());
+        let mut out = cairo::ImageSurface::create(cairo::Format::ARgb32, w, h).ok()?;
+        {
+            let cr = cairo::Context::new(&out).ok()?;
+            cr.set_source_surface(frame, 0.0, 0.0).ok()?;
+            cr.paint().ok()?;
+        }
+        out.flush();
+        let stride = out.stride() as usize;
+        let (w, h) = (w as usize, h as usize);
+        {
+            let mut data = out.data().ok()?;
+            // premultiplied BGRA, so colours never exceed alpha
+            match self {
+                VideoFilter::Grayscale => {
+                    for px in data.chunks_exact_mut(4) {
+                        let y = (px[2] as u32 * 77 + px[1] as u32 * 150 + px[0] as u32 * 29) >> 8;
+                        px[0] = y as u8;
+                        px[1] = y as u8;
+                        px[2] = y as u8;
+                    }
+                }
+                VideoFilter::Invert => {
+                    for px in data.chunks_exact_mut(4) {
+                        let a = px[3];
+                        for c in &mut px[..3] {
+                            *c = a - (*c).min(a);
+                        }
+                    }
+                }
+                VideoFilter::Posterize(levels) => {
+                    let steps = (levels.max(2) - 1) as f64;
+                    for px in data.chunks_exact_mut(4) {
+                        let a = px[3];
+                        for c in &mut px[..3] {
+                            let v = (*c as f64 / 255.0 * steps).round() / steps * 255.0;
+                            *c = (v as u8).min(a);
+                        }
+                    }
+                }
+                VideoFilter::Pixelate(block) => {
+                    let b = block.max(2) as usize;
+                    for by in (0..h).step_by(b) {
+                        for bx in (0..w).step_by(b) {
+                            let (y1, x1) = ((by + b).min(h), (bx + b).min(w));
+                            let mut sum = [0u32; 4];
+                            for y in by..y1 {
+                                for x in bx..x1 {
+                                    let p = &data[y * stride + x * 4..][..4];
+                                    for (t, v) in sum.iter_mut().zip(p) {
+                                        *t += *v as u32;
+                                    }
+                                }
+                            }
+                            let n = ((y1 - by) * (x1 - bx)) as u32;
+                            let avg = sum.map(|v| (v / n) as u8);
+                            for y in by..y1 {
+                                for x in bx..x1 {
+                                    data[y * stride + x * 4..][..4].copy_from_slice(&avg);
+                                }
+                            }
+                        }
+                    }
+                }
+                VideoFilter::None => {}
+            }
+        }
+        out.mark_dirty();
+        Some(out)
+    }
 }
 
 impl Default for Shape {
@@ -61,6 +172,7 @@ impl Default for Shape {
             flow: d.flow,
             image: None,
             video: None,
+            video_filter: VideoFilter::None,
         }
     }
 }
@@ -263,6 +375,11 @@ impl Scene {
             Some(s) => s,
             None => &mut self.scratch,
         }
+    }
+
+    pub fn shape_set_video_filter(&mut self, id: Id, filter: VideoFilter) {
+        self.shape_mut(id).video_filter = filter;
+        self.request_redraw();
     }
 
     /// Show an image in the shape. A shape with no path yet gets the
@@ -522,7 +639,8 @@ impl Scene {
                     let video = shape
                         .video
                         .and_then(|v| self.videos.get(&v))
-                        .and_then(Video::surface);
+                        .and_then(Video::surface)
+                        .map(|f| shape.video_filter.apply(&f).unwrap_or(f));
                     let image = shape.image.and_then(|i| self.image(i)).map(|i| &i.surface);
                     render_shape(cr, shape, image, video.as_ref());
                 }
@@ -892,5 +1010,72 @@ mod tests {
             }))
             .is_err()
         );
+    }
+
+    /// A 4x4 frame: left half (r, g, b), right half white.
+    fn frame(r: u8, g: u8, b: u8) -> cairo::ImageSurface {
+        let mut f = cairo::ImageSurface::create(cairo::Format::ARgb32, 4, 4).unwrap();
+        let stride = f.stride() as usize;
+        {
+            let mut d = f.data().unwrap();
+            for y in 0..4 {
+                for x in 0..4 {
+                    let px = if x < 2 {
+                        [b, g, r, 255]
+                    } else {
+                        [255, 255, 255, 255]
+                    };
+                    d[y * stride + x * 4..][..4].copy_from_slice(&px);
+                }
+            }
+        }
+        f
+    }
+
+    fn px(f: &mut cairo::ImageSurface, x: usize, y: usize) -> [u8; 4] {
+        let stride = f.stride() as usize;
+        let d = f.data().unwrap();
+        d[y * stride + x * 4..][..4].try_into().unwrap()
+    }
+
+    #[test]
+    fn video_filters() {
+        let src = frame(200, 40, 0);
+        assert!(VideoFilter::None.apply(&src).is_none());
+
+        let mut g = VideoFilter::Grayscale.apply(&src).unwrap();
+        let [b, gr, r, a] = px(&mut g, 0, 0);
+        assert!(b == gr && gr == r && a == 255, "{:?}", [b, gr, r, a]);
+        assert!(
+            (80..=90).contains(&r),
+            "luma of (200,40,0) is about 84: {r}"
+        );
+
+        let mut i = VideoFilter::Invert.apply(&src).unwrap();
+        assert_eq!(px(&mut i, 0, 0), [255, 215, 55, 255]);
+        assert_eq!(px(&mut i, 3, 3), [0, 0, 0, 255]);
+
+        let mut p = VideoFilter::Posterize(2).apply(&src).unwrap();
+        assert_eq!(px(&mut p, 0, 0), [0, 0, 255, 255]);
+
+        // one 4x4 block: everything is the average of both halves
+        let mut q = VideoFilter::Pixelate(4).apply(&src).unwrap();
+        let avg = px(&mut q, 0, 0);
+        assert_eq!(avg, [127, 147, 227, 255]);
+        assert_eq!(px(&mut q, 3, 3), avg);
+    }
+
+    #[test]
+    fn filters_from_the_abi() {
+        use underweb_abi::*;
+        assert_eq!(
+            VideoFilter::from_abi(UW_FILTER_PIXELATE, 0.0),
+            VideoFilter::Pixelate(12)
+        );
+        assert_eq!(
+            VideoFilter::from_abi(UW_FILTER_POSTERIZE, 3.0),
+            VideoFilter::Posterize(3)
+        );
+        assert_eq!(VideoFilter::from_abi(99, 1.0), VideoFilter::None);
     }
 }

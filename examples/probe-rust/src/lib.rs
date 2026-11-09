@@ -28,6 +28,11 @@ fn report(w: &Window, name: &str, result: Result<String, String>) {
 }
 
 impl Page for Probe {
+    // tests: the window's size, as the browser reports it
+    fn resize(&mut self, w: &Window, width: f64, height: f64) {
+        w.log(&format!("PROBE resize {width}x{height}"));
+    }
+
     fn activate(&mut self, w: &Window) {
         w.set_title("sandbox probe");
         if w.param("crash").is_some() {

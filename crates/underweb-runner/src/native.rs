@@ -43,6 +43,7 @@ pub struct NativePage {
     net: Option<UwNetFn>,
     pd: Option<UwPdFn>,
     media: Option<UwMediaFn>,
+    resize: Option<UwResizeFn>,
     // last: unloading must happen after everything above
     _lib: Library,
 }
@@ -77,6 +78,7 @@ impl NativePage {
             let net = lib.get::<UwNetFn>(b"uw_net\0").ok().map(|s| *s);
             let pd = lib.get::<UwPdFn>(b"uw_pd\0").ok().map(|s| *s);
             let media = lib.get::<UwMediaFn>(b"uw_media\0").ok().map(|s| *s);
+            let resize = lib.get::<UwResizeFn>(b"uw_resize\0").ok().map(|s| *s);
 
             let mut ctx = Box::new(Ctx {
                 scene,
@@ -99,6 +101,7 @@ impl NativePage {
                 net,
                 pd,
                 media,
+                resize,
                 _lib: lib,
             })
         }
@@ -114,6 +117,13 @@ impl Page for NativePage {
     fn update(&mut self, dt: f64) -> Result<()> {
         if let Some(f) = self.update {
             unsafe { f(&*self.host, dt) };
+        }
+        Ok(())
+    }
+
+    fn resize(&mut self, w: f64, h: f64) -> Result<()> {
+        if let Some(f) = self.resize {
+            unsafe { f(&*self.host, w, h) };
         }
         Ok(())
     }
@@ -662,6 +672,12 @@ extern "C" fn layout_set_background(p: *mut c_void, l: u32, r: f64, g: f64, b: f
     })
 }
 
+extern "C" fn shape_set_video_filter(p: *mut c_void, shape: u32, kind: u32, amount: f64) {
+    with_scene(p, |s| {
+        s.shape_set_video_filter(shape, underweb_guest::VideoFilter::from_abi(kind, amount))
+    })
+}
+
 fn host_table(ctx: *mut c_void) -> UwHost {
     UwHost {
         abi_version: UW_ABI_VERSION,
@@ -728,5 +744,6 @@ fn host_table(ctx: *mut c_void) -> UwHost {
         image_from_bytes,
         image_size,
         layout_set_background,
+        shape_set_video_filter,
     }
 }

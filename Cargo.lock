@@ -5936,6 +5936,7 @@ dependencies = [
  "image",
  "pango",
  "pangocairo",
+ "underweb-abi",
  "underweb-ipc",
 ]
 

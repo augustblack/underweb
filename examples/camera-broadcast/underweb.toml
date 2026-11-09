@@ -1,0 +1,13 @@
+[package]
+name = "camera-broadcast"
+version = "0.1.0"
+kind = "js"
+entry = "main.js"
+description = "Send the live camera to an Icecast server and watch it come back. ?url=http://host:port/mount.ogg&password=...&source=camera (test:ball works without a camera)."
+
+[permissions]
+camera = true
+# where the stream goes (the browser asks before connecting)
+net.tcp.connect = ["127.0.0.1:8000", "localhost:8000", "radio.dyne.org:8000"]
+# to play it back from the server
+fetch = ["http://127.0.0.1:8000/", "http://localhost:8000/", "http://radio.dyne.org:8000/"]

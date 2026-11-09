@@ -1,7 +1,8 @@
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::mpsc::{self, Receiver};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use underweb_audio::AudioRing;
@@ -96,8 +97,17 @@ struct Buffers {
     width: u32,
     height: u32,
     stride: u32,
+    /// Each of the two buffers; the memory is twice this.
+    buffer_bytes: usize,
     shm: Shm,
 }
+
+/// New frame memory leaves room to grow: sizes round up to this.
+const GROW_STEP: u32 = 256;
+
+/// While a new size waits for its first frame, newer sizes wait too, for
+/// at most this long.
+const RESIZE_WAIT: Duration = Duration::from_millis(100);
 
 pub struct Guest {
     pub package: Package,
@@ -105,6 +115,11 @@ pub struct Guest {
     child: underweb_sandbox::Process,
     buffers: Arc<Mutex<Option<Buffers>>>,
     generation: u32,
+    /// The last size sent, and when ([`Guest::resize`]).
+    sized: Option<(u32, u32, f64)>,
+    sized_at: Instant,
+    /// Generation of the newest frame the page delivered.
+    framed: Arc<AtomicU32>,
     events: Receiver<GuestEvent>,
     /// Only the newest frame is kept: a slow consumer skips frames
     /// instead of queueing them (each can be tens of megabytes).
@@ -256,6 +271,7 @@ impl Guest {
             opts.sandbox,
         );
         let latest: Arc<Mutex<Option<Frame>>> = Arc::new(Mutex::new(None));
+        let framed = Arc::new(AtomicU32::new(0));
         {
             let chan = chan.clone();
             let buffers = buffers.clone();
@@ -264,6 +280,7 @@ impl Guest {
             let sound = sound.clone();
             let media = media.clone();
             let latest = latest.clone();
+            let framed = framed.clone();
             std::thread::Builder::new()
                 .name(format!("guest {}", package.name()))
                 .spawn(move || {
@@ -274,6 +291,7 @@ impl Guest {
                         &sound,
                         &media,
                         &latest,
+                        &framed,
                         &tx,
                         wake.as_deref(),
                     )
@@ -285,6 +303,9 @@ impl Guest {
             child,
             buffers,
             generation: 0,
+            sized: None,
+            sized_at: Instant::now(),
+            framed,
             events,
             latest,
             broker,
@@ -293,21 +314,40 @@ impl Guest {
         })
     }
 
-    /// Size the page in physical pixels. Allocates fresh frame buffers.
+    /// Size the page in physical pixels, now. The frame memory is reused
+    /// when the new size fits in it; when it doesn't, new memory is made
+    /// with room to grow.
     pub fn configure(&mut self, width: u32, height: u32, scale: f64) -> Result<()> {
         let (width, height) = (width.max(1), height.max(1));
         let stride = argb32_stride(width);
-        let shm = Shm::create(stride as usize * height as usize * 2)?;
+        let need = stride as usize * height as usize;
         self.generation += 1;
         let generation = self.generation;
-        let fd = shm.raw_handle();
-        *self.buffers.lock().unwrap() = Some(Buffers {
+        let mut guard = self.buffers.lock().unwrap();
+        let kept = guard
+            .take()
+            .filter(|b| b.buffer_bytes >= need)
+            .map(|b| (b.shm, b.buffer_bytes));
+        let (shm, buffer_bytes, fresh) = match kept {
+            Some((shm, n)) => (shm, n, false),
+            None => {
+                let round = |v: u32| v.div_ceil(GROW_STEP) * GROW_STEP;
+                let n = argb32_stride(round(width)) as usize * round(height) as usize;
+                (Shm::create(n * 2)?, n, true)
+            }
+        };
+        let handle = fresh.then(|| shm.raw_handle());
+        *guard = Some(Buffers {
             generation,
             width,
             height,
             stride,
+            buffer_bytes,
             shm,
         });
+        drop(guard);
+        self.sized = Some((width, height, scale));
+        self.sized_at = Instant::now();
         self.chan.send(
             &HostMsg::Configure {
                 generation,
@@ -315,9 +355,39 @@ impl Guest {
                 height,
                 stride,
                 scale,
+                buffer_bytes: buffer_bytes as u64,
             },
-            Some(fd),
+            handle,
         )
+    }
+
+    /// Size the page as the window changes, without flooding it: while the
+    /// last new size hasn't produced a frame (for up to 100 ms), newer
+    /// sizes are skipped. Call it on every repaint with the current size;
+    /// returns whether a size was sent. When it wasn't, call again soon
+    /// (the final size is sent once the page catches up).
+    pub fn resize(&mut self, width: u32, height: u32, scale: f64) -> Result<bool> {
+        let want = (width.max(1), height.max(1), scale);
+        if self.sized == Some(want) {
+            return Ok(false);
+        }
+        let waiting = self.generation > 0
+            && self.framed.load(Ordering::Acquire) != self.generation
+            && self.sized_at.elapsed() < RESIZE_WAIT;
+        if waiting {
+            return Ok(false);
+        }
+        self.configure(want.0, want.1, want.2)?;
+        Ok(true)
+    }
+
+    /// Bytes in each frame buffer (tests: memory is reused across sizes).
+    pub fn frame_buffer_bytes(&self) -> Option<usize> {
+        self.buffers
+            .lock()
+            .unwrap()
+            .as_ref()
+            .map(|b| b.buffer_bytes)
     }
 
     pub fn tick(&self, dt: f64) -> Result<()> {
@@ -485,6 +555,7 @@ fn read_loop(
     sound: &Sound,
     media: &Arc<crate::media::Media>,
     latest: &Mutex<Option<Frame>>,
+    framed: &AtomicU32,
     tx: &mpsc::Sender<GuestEvent>,
     wake: Option<&(dyn Fn() + Send + Sync)>,
 ) {
@@ -535,6 +606,7 @@ fn read_loop(
                     }
                 };
                 if let Some(frame) = frame {
+                    framed.store(generation, Ordering::Release);
                     let _ = chan.send(&HostMsg::Release { generation, index }, None);
                     let first = {
                         let mut slot = latest.lock().unwrap();
@@ -567,7 +639,7 @@ fn read_loop(
 /// RGBA (both premultiplied).
 fn copy_frame(b: &Buffers, index: u32) -> Frame {
     let len = b.stride as usize * b.height as usize;
-    let src = &b.shm.as_mut_slice()[index as usize * len..][..len];
+    let src = &b.shm.as_mut_slice()[index as usize * b.buffer_bytes..][..len];
     let mut rgba = Vec::with_capacity((b.width * b.height * 4) as usize);
     for row in src.chunks_exact(b.stride as usize) {
         for px in row[..(b.width * 4) as usize].chunks_exact(4) {

@@ -8,9 +8,9 @@
 
 // The ABI this header describes. Version 2 appended network and storage
 // functions to [`UwHost`], version 3 audio, version 4 video, version 5
-// transforms, images and text modes; packages built for older versions
-// still load.
-#define UW_ABI_VERSION 5
+// transforms, images and text modes, version 6 video filters and
+// `uw_resize`; packages built for older versions still load.
+#define UW_ABI_VERSION 6
 
 // The oldest ABI the runner still accepts.
 #define UW_ABI_MIN_VERSION 1
@@ -27,6 +27,19 @@
 // The text flows word by word inside the shape's outline instead of
 // filling its bounding box.
 #define UW_TEXT_FLOW 2
+
+// [`UwHost::shape_set_video_filter`]: how a shape shows its video.
+#define UW_FILTER_NONE 0
+
+#define UW_FILTER_GRAYSCALE 1
+
+#define UW_FILTER_INVERT 2
+
+// `amount`: block size in pixels (default 12).
+#define UW_FILTER_PIXELATE 3
+
+// `amount`: levels per color channel (default 4).
+#define UW_FILTER_POSTERIZE 4
 
 // [`UwNetEvent::kind`]: a TCP connection or listener is up, or a UDP
 // socket is open; `text` is the address.
@@ -216,6 +229,9 @@ typedef struct UwHost {
   bool (*image_size)(void *ctx, uint32_t image, uint32_t *width, uint32_t *height);
   // Paint the window under the layout's shapes; alpha 0 for none.
   void (*layout_set_background)(void *ctx, uint32_t layout, double r, double g, double b, double a);
+  // Show the shape's video through a `UW_FILTER_*`; `amount` 0 for the
+  // filter's default.
+  void (*shape_set_video_filter)(void *ctx, uint32_t shape, uint32_t kind, double amount);
 } UwHost;
 
 typedef struct UwPointerEvent {
@@ -280,6 +296,7 @@ UW_EXPORT void uw_deactivate(const UwHost *host);
 UW_EXPORT void uw_net(const UwHost *host, const UwNetEvent *ev);
 UW_EXPORT void uw_pd(const UwHost *host, const UwPdEvent *ev);
 UW_EXPORT void uw_media(const UwHost *host, const UwMediaEvent *ev);
+UW_EXPORT void uw_resize(const UwHost *host, double w, double h);
 
 /* Convenience: call a host function with its context, e.g.
  *   UW(host, set_title, "hello");                                       */

@@ -26,6 +26,17 @@ to open one in the layout editor.
 Not ported: 14browser (a WebKit page; that waits for the CEF phase) and
 16underweb (the old browser itself).
 
+## Live camera
+
+| Package | Shows |
+|---|---|
+| `camera-effects` | the camera in shapes: mirror, tiles, kaleidoscope (one video in transformed shapes), grayscale, invert, pixelate, posterize (video filters), freeze; a circle to drag; the layout follows the window (`resize`) |
+| `camera-broadcast` | Go live / Stop: the camera to an Icecast server, and back from it. Sends to a local server (`127.0.0.1:8000`) unless you pass `?url=…&password=…` |
+
+Both ask for the camera. `?source=test:ball` (or `test:smpte`) stands in
+for it; `camera-effects?effect=kaleidoscope` starts with an effect, and
+`camera-broadcast?live=1` goes live at once.
+
 ## Others
 
 `hello-net` fetches from GitHub (it asks first). `probe-*` packages are

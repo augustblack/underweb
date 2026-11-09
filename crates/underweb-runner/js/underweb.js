@@ -113,6 +113,18 @@ class Shape {
   set font(f) { ops.op_uw_shape_set_font(this.id, String(f)); }
   /** Show a video inside the shape (null to stop). */
   set video(v) { ops.op_uw_shape_set_video(this.id, v ? v.id : 0); }
+  /**
+   * Show the video through an effect: "grayscale", "invert",
+   * "pixelate" (amount: block size, default 12) or "posterize" (amount:
+   * levels, default 4); null for none.
+   */
+  setVideoFilter(name, amount = 0) {
+    const kinds = { grayscale: 1, invert: 2, pixelate: 3, posterize: 4 };
+    const kind = name == null ? 0 : kinds[name];
+    if (kind === undefined) throw new Error(`no video filter ${name}`);
+    ops.op_uw_shape_set_video_filter(this.id, kind, amount);
+    return this;
+  }
   get name() { return this.#name; }
   set name(n) { this.#name = String(n); ops.op_uw_shape_set_name(this.id, this.#name); }
   /** Text is Pango markup: <b>, <span foreground="red">... */
@@ -425,6 +437,8 @@ function dispatch(name, arg) {
   if (name === "pointer") {
     arg.shape = shapes.get(arg.shape) ?? null;
   }
+  // resize(width, height)
+  if (name === "resize") return fn(...arg);
   fn(arg);
 }
 

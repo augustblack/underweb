@@ -1,0 +1,9 @@
+[package]
+name = "camera-effects"
+version = "0.1.0"
+kind = "js"
+entry = "main.js"
+description = "Live camera in shapes, with effects: mirror, tiles, kaleidoscope, grayscale, invert, pixelate, posterize, freeze. ?source=test:ball works without a camera."
+
+[permissions]
+camera = true

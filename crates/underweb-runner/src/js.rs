@@ -1,7 +1,7 @@
 //! JavaScript and TypeScript packages, run in V8 through deno_core.
 //!
 //! A JS/TS page is an ES module exporting any of `activate()`,
-//! `update(dt)`, `pointer(ev)` and `deactivate()`. There are no Deno or
+//! `update(dt)`, `pointer(ev)`, `resize(width, height)` and `deactivate()`. There are no Deno or
 //! Node APIs: the only capabilities are the ops below, which go to the
 //! same [`Scene`] that native packages use. TypeScript is transpiled
 //! (not type-checked) with deno_ast.
@@ -537,6 +537,10 @@ fn op_uw_shape_set_text_mode(state: &mut OpState, id: u32, markup: bool, flow: b
     })
 }
 #[op2(fast)]
+fn op_uw_shape_set_video_filter(state: &mut OpState, id: u32, kind: u32, amount: f64) {
+    scene(state).shape_set_video_filter(id, underweb_guest::VideoFilter::from_abi(kind, amount))
+}
+#[op2(fast)]
 fn op_uw_shape_set_image(state: &mut OpState, id: u32, image: u32) {
     scene(state).shape_set_image(id, (image != 0).then_some(image))
 }
@@ -579,6 +583,7 @@ deno_core::extension!(
         op_uw_media_open, op_uw_media_broadcast, op_uw_media_cmd, op_uw_media_info,
         op_uw_shape_set_video,
         op_uw_shape_set_name, op_uw_shape_set_matrix, op_uw_shape_set_text_mode,
+        op_uw_shape_set_video_filter,
         op_uw_shape_set_image, op_uw_image_open, op_uw_image_from_bytes, op_uw_image_size,
         op_uw_layout_set_background,
     ],
@@ -804,6 +809,10 @@ impl Page for JsPage {
 
     fn update(&mut self, dt: f64) -> Result<()> {
         self.dispatch("update", &format!("{dt}"))
+    }
+
+    fn resize(&mut self, w: f64, h: f64) -> Result<()> {
+        self.dispatch("resize", &format!("[{w}, {h}]"))
     }
 
     fn pointer(&mut self, ev: &UwPointerEvent) -> Result<()> {

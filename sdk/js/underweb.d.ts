@@ -77,6 +77,15 @@ declare module "underweb" {
     toLocal(x: number, y: number): [number, number];
     /** Show a video inside the outline; null to stop. */
     set video(v: Video | null);
+    /**
+     * Show the video through an effect; null for none. `amount` is the
+     * block size for "pixelate" (default 12) and the levels per channel
+     * for "posterize" (default 4).
+     */
+    setVideoFilter(
+      name: "grayscale" | "invert" | "pixelate" | "posterize" | null,
+      amount?: number,
+    ): this;
   }
 
   export interface PointerEvent {
@@ -227,5 +236,8 @@ declare namespace UnderwebPage {
   function activate(): void;
   function update(dt: number): void;
   function pointer(ev: import("underweb").PointerEvent): void;
+  /** The window's size in logical pixels: once at start, then on every
+   * change (also in `window.width` / `window.height`). */
+  function resize(width: number, height: number): void;
   function deactivate(): void;
 }

@@ -371,3 +371,91 @@ fn clicks_reach_the_shape_under_the_pointer() {
         assert_eq!(got.as_deref(), Some(want), "{pkg}");
     }
 }
+
+/// Spawn `name` sandboxed at `w`x`h`; events go to the returned guest.
+fn sized(name: &str, w: u32, h: u32) -> Guest {
+    let mut g = Guest::spawn(
+        example(name),
+        SpawnOptions {
+            data_dir: Some(std::env::temp_dir().join("underweb-test-data").join(name)),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    g.configure(w, h, 1.0).unwrap();
+    g
+}
+
+/// Wait for a frame of `w`x`h` and the log line `want`; the logs seen.
+fn wait_for(g: &Guest, w: u32, h: u32, want: &str) -> Vec<String> {
+    let (mut logs, mut framed) = (Vec::new(), false);
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while Instant::now() < deadline && !(framed && logs.iter().any(|l: &String| l == want)) {
+        match g.next_event(Duration::from_millis(50)) {
+            Some(GuestEvent::Log(l)) => logs.push(l),
+            Some(GuestEvent::Error(e)) => panic!("{e}"),
+            Some(GuestEvent::Frame(f)) => framed |= (f.width, f.height) == (w, h),
+            _ => {}
+        }
+    }
+    assert!(framed, "no {w}x{h} frame; logs {logs:?}");
+    assert!(logs.iter().any(|l| l == want), "no {want:?} in {logs:?}");
+    logs
+}
+
+#[test]
+fn resizing_reuses_frame_memory_and_tells_the_page() {
+    let js: fn(u32, u32) -> String = |w, h| format!("PROBE resize {w}x{h} {w}x{h}");
+    let rust: fn(u32, u32) -> String = |w, h| format!("PROBE resize {w}x{h}");
+    for (name, said) in [("probe-js", js), ("probe-rust", rust)] {
+        let mut g = sized(name, 700, 450);
+        wait_for(&g, 700, 450, &said(700, 450));
+        let room = g.frame_buffer_bytes().unwrap();
+        assert!(
+            room > 700 * 4 * 450,
+            "{name}: no room to grow ({room} bytes)"
+        );
+
+        // smaller, and a little bigger: the same memory
+        g.configure(600, 400, 1.0).unwrap();
+        wait_for(&g, 600, 400, &said(600, 400));
+        g.configure(760, 500, 1.0).unwrap();
+        wait_for(&g, 760, 500, &said(760, 500));
+        assert_eq!(g.frame_buffer_bytes(), Some(room), "{name}");
+
+        // much bigger: new memory, and the page still follows
+        g.configure(1300, 900, 1.0).unwrap();
+        wait_for(&g, 1300, 900, &said(1300, 900));
+        assert!(g.frame_buffer_bytes().unwrap() > room, "{name}");
+        g.shutdown();
+    }
+}
+
+#[test]
+fn dragging_the_window_sends_few_sizes_and_ends_at_the_last() {
+    let mut g = sized("probe-js", 500, 300);
+    wait_for(&g, 500, 300, "PROBE resize 500x300 500x300");
+    // a drag: a new size every repaint, faster than the page draws
+    let mut sent = 0;
+    for i in 1..=50u32 {
+        if g.resize(500 + i * 4, 300 + i * 2, 1.0).unwrap() {
+            sent += 1;
+        }
+    }
+    assert!(sent <= 2, "{sent} sizes sent during a burst of 50");
+    // the app keeps calling while it repaints: the last size gets there
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let mut logs = Vec::new();
+    while Instant::now() < deadline && !logs.iter().any(|l: &String| l.contains("700x400 700x400"))
+    {
+        let _ = g.resize(700, 400, 1.0).unwrap();
+        if let Some(GuestEvent::Log(l)) = g.next_event(Duration::from_millis(16)) {
+            logs.push(l);
+        }
+    }
+    assert!(
+        logs.iter().any(|l| l == "PROBE resize 700x400 700x400"),
+        "{logs:?}"
+    );
+    g.shutdown();
+}

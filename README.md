@@ -183,6 +183,7 @@ export function activate() {
 }
 export function update(dt: number) {}   // every frame while window.animating
 export function pointer(ev) {}          // ev.shape is the shape under the pointer
+export function resize(width, height) {} // the window's size: at start and on every change
 ```
 
 Shapes can be moved, turned and scaled, show pictures, and flow text
@@ -238,10 +239,17 @@ import { Shape, video } from "underweb";
 const clip = video.open("clip.webm", { loop: true }).play();  // or "https://…", "camera", "test:ball"
 shape.video = clip;                                          // clipped to the shape's path
 clip.onready = ({ width, height }) => { /* … */ };
-video.broadcast("camera", "http://icecast.example.org:8000/live.ogg", { password: "…" });
+video.broadcast("camera", "http://icecast.example.org:8000/live.ogg", { password: "…" }).play();
 ```
 
-`examples/hello-video` is the 2011 07videoplay demo, ported.
+A shape can show its video through an effect:
+`shape.setVideoFilter("grayscale" | "invert" | "pixelate" | "posterize", amount)`
+(`set_video_filter` in Rust, `shape_set_video_filter` in C). The layout
+editor doesn't carry filters yet.
+
+`examples/hello-video` is the 2011 07videoplay demo, ported;
+`examples/camera-effects` and `examples/camera-broadcast` use the live
+camera (`?source=test:ball` stands in for one).
 `examples/hello-audio` and `examples/hello-pd` are the 2011 audio and Pure
 Data demos, ported (hello-pd uses the original `440.pd`).
 `examples/hello-net` asks to fetch from GitHub. `--allow-declared` grants

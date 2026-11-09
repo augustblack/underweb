@@ -34,6 +34,7 @@ mod tests {
                 height: 16,
                 stride: 64,
                 scale: 2.0,
+                buffer_bytes: 2048,
             },
             Some(shm.raw_handle()),
         )

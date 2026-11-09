@@ -25,6 +25,7 @@ UW_EXPORT void uw_deactivate(const UwHost *host);
 UW_EXPORT void uw_net(const UwHost *host, const UwNetEvent *ev);
 UW_EXPORT void uw_pd(const UwHost *host, const UwPdEvent *ev);
 UW_EXPORT void uw_media(const UwHost *host, const UwMediaEvent *ev);
+UW_EXPORT void uw_resize(const UwHost *host, double w, double h);
 
 /* Convenience: call a host function with its context, e.g.
  *   UW(host, set_title, "hello");                                       */
@@ -35,6 +36,6 @@ UW_EXPORT void uw_media(const UwHost *host, const UwMediaEvent *ev);
 
 [export]
 include = ["UwHost", "UwPointerEvent", "UwNetEvent", "UwPdEvent", "UwMediaEvent", "UwMediaInfo"]
-exclude = ["UwAbiVersionFn", "UwActivateFn", "UwUpdateFn", "UwPointerFn", "UwDrawFn", "UwDeactivateFn", "UwNetFn", "UwPdFn", "UwMediaFn"]
+exclude = ["UwAbiVersionFn", "UwActivateFn", "UwUpdateFn", "UwPointerFn", "UwDrawFn", "UwDeactivateFn", "UwNetFn", "UwPdFn", "UwMediaFn", "UwResizeFn"]
 
 [defines]

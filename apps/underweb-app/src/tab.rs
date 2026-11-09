@@ -531,18 +531,31 @@ impl Tab {
             (rect.height() * ppp).round() as u32,
             ppp,
         );
-        if self.configured != Some(size)
-            && size.0 > 0
-            && size.1 > 0
-            && guest.configure(size.0, size.1, ppp as f64).is_ok()
-        {
-            self.configured = Some(size);
+        if self.configured != Some(size) && size.0 > 0 && size.1 > 0 {
+            match guest.resize(size.0, size.1, ppp as f64) {
+                Ok(true) => self.configured = Some(size),
+                // the page is still drawing the last size: ask again soon
+                Ok(false) => ui
+                    .ctx()
+                    .request_repaint_after(std::time::Duration::from_millis(16)),
+                Err(_) => {}
+            }
         }
 
         if let Some(tex) = &self.texture {
-            // a frame from before a resize is stretched until the new one arrives
-            let uv = egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0));
-            ui.painter().image(tex.id(), rect, uv, egui::Color32::WHITE);
+            // At its own size from the top-left, never stretched: while the
+            // window is dragged, shapes stay put and new space stays blank
+            // until the page has drawn at the new size.
+            ui.painter().rect_filled(rect, 0.0, egui::Color32::WHITE);
+            let [tw, th] = tex.size();
+            let frame = egui::vec2(tw as f32, th as f32) / ppp;
+            let shown = frame.min(rect.size());
+            let uv = egui::Rect::from_min_max(
+                egui::pos2(0.0, 0.0),
+                egui::pos2(shown.x / frame.x, shown.y / frame.y),
+            );
+            let at = egui::Rect::from_min_size(rect.min, shown);
+            ui.painter().image(tex.id(), at, uv, egui::Color32::WHITE);
         }
 
         // while editing, the editor has the pointer

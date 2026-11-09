@@ -22,6 +22,8 @@ pub trait Page {
     fn media(&mut self, id: u32, ev: &MediaEvent) -> Result<()>;
     /// Messages Pd sent to receivers the page subscribed to.
     fn pd(&mut self, msgs: Vec<PdMessage>) -> Result<()>;
+    /// The window's size changed (also once at start), in logical pixels.
+    fn resize(&mut self, w: f64, h: f64) -> Result<()>;
     /// Raw cairo drawing on top of the scene (native packages only).
     fn draw(&mut self, _cr: &cairo::Context, _w: f64, _h: f64) {}
     fn deactivate(&mut self) {}
@@ -30,6 +32,8 @@ pub trait Page {
 struct Frames {
     generation: u32,
     shm: Shm,
+    /// Each of the two buffers in `shm` (at least `stride * height`).
+    buffer_bytes: usize,
     width: u32,
     height: u32,
     stride: u32,
@@ -100,22 +104,41 @@ pub fn run(
                 height,
                 stride,
                 scale,
+                buffer_bytes,
             } => {
-                let fd = fd.context("Configure without a frame buffer")?;
-                let len = stride as usize * height as usize * 2;
+                let buffer_bytes = buffer_bytes as usize;
+                if buffer_bytes < stride as usize * height as usize {
+                    anyhow::bail!("frame buffers too small for {width}x{height}");
+                }
+                // new memory comes with a handle; without one, the size
+                // changed within the memory we have
+                let shm = match (fd, frames.take()) {
+                    (Some(fd), _) => Shm::from_handle(fd, buffer_bytes * 2)?,
+                    (None, Some(old)) if old.buffer_bytes == buffer_bytes => old.shm,
+                    (None, _) => anyhow::bail!("Configure without a frame buffer"),
+                };
                 frames = Some(Frames {
                     generation,
-                    shm: Shm::from_handle(fd, len)?,
+                    shm,
+                    buffer_bytes,
                     width,
                     height,
                     stride,
                     scale,
                     free: [true, true],
                 });
-                let mut s = scene.borrow_mut();
-                s.width = width as f64 / scale;
-                s.height = height as f64 / scale;
-                s.request_redraw();
+                let (w, h) = (width as f64 / scale, height as f64 / scale);
+                let changed = {
+                    let mut s = scene.borrow_mut();
+                    let changed = (s.width, s.height) != (w, h);
+                    s.width = w;
+                    s.height = h;
+                    s.request_redraw();
+                    changed
+                };
+                if changed {
+                    page.resize(w, h).context("resize")?;
+                }
             }
             HostMsg::Tick { dt } => page.update(dt).context("update")?,
             // the editor has the pointer while it is open
@@ -199,8 +222,7 @@ fn draw_if_needed(
         scene.borrow_mut().request_redraw();
         return Ok(false);
     };
-    let buf_len = f.stride as usize * f.height as usize;
-    let ptr = unsafe { f.shm.as_ptr().add(index * buf_len) };
+    let ptr = unsafe { f.shm.as_ptr().add(index * f.buffer_bytes) };
     let (w, h) = (f.width as f64 / f.scale, f.height as f64 / f.scale);
     {
         let s = scene.borrow();

@@ -25,3 +25,8 @@ export async function activate() {
   }
   window.log("PROBE done");
 }
+
+// tests: the window's size, as the browser reports it
+export function resize(w, h) {
+  window.log(`PROBE resize ${w}x${h} ${window.width}x${window.height}`);
+}

@@ -44,20 +44,24 @@ pub type RawOsHandle = std::os::windows::io::RawHandle;
 use serde::{Deserialize, Serialize};
 
 /// Bumped on any incompatible protocol change.
-pub const PROTOCOL_VERSION: u32 = 2;
+pub const PROTOCOL_VERSION: u32 = 3;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum HostMsg {
-    /// (Re)size the page. Carries the shared-memory fd for the two frame
-    /// buffers, each `stride * height` bytes, in physical pixels.
-    /// `generation` increases with every Configure; frames carry it so the
-    /// host can drop frames drawn into an old buffer.
+    /// (Re)size the page, in physical pixels. The shared memory holds two
+    /// frame buffers of `buffer_bytes` each (at least `stride * height`,
+    /// usually more, so most resizes need no new memory). The message
+    /// carries the memory's handle when it is new, and none when the page
+    /// keeps drawing into the memory it has. `generation` increases with
+    /// every Configure; frames carry it so the host can drop frames drawn
+    /// at an old size.
     Configure {
         generation: u32,
         width: u32,
         height: u32,
         stride: u32,
         scale: f64,
+        buffer_bytes: u64,
     },
     /// One display frame passed; `dt` in seconds. Sent only while animating.
     Tick {

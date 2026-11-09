@@ -12,6 +12,7 @@
 //! void uw_net(const UwHost *host, const UwNetEvent *ev); // optional, ABI 2
 //! void uw_pd(const UwHost *host, const UwPdEvent *ev);   // optional, ABI 3
 //! void uw_media(const UwHost *host, const UwMediaEvent *ev); // optional, ABI 4
+//! void uw_resize(const UwHost *host, double w, double h);   // optional, ABI 6
 //! ```
 //!
 //! Everything the package can do goes through the function table in
@@ -23,9 +24,9 @@ use std::ffi::{c_char, c_void};
 
 /// The ABI this header describes. Version 2 appended network and storage
 /// functions to [`UwHost`], version 3 audio, version 4 video, version 5
-/// transforms, images and text modes; packages built for older versions
-/// still load.
-pub const UW_ABI_VERSION: u32 = 5;
+/// transforms, images and text modes, version 6 video filters and
+/// `uw_resize`; packages built for older versions still load.
+pub const UW_ABI_VERSION: u32 = 6;
 /// The oldest ABI the runner still accepts.
 pub const UW_ABI_MIN_VERSION: u32 = 1;
 
@@ -38,6 +39,15 @@ pub const UW_TEXT_MARKUP: u32 = 1;
 /// The text flows word by word inside the shape's outline instead of
 /// filling its bounding box.
 pub const UW_TEXT_FLOW: u32 = 2;
+
+/// [`UwHost::shape_set_video_filter`]: how a shape shows its video.
+pub const UW_FILTER_NONE: u32 = 0;
+pub const UW_FILTER_GRAYSCALE: u32 = 1;
+pub const UW_FILTER_INVERT: u32 = 2;
+/// `amount`: block size in pixels (default 12).
+pub const UW_FILTER_PIXELATE: u32 = 3;
+/// `amount`: levels per color channel (default 4).
+pub const UW_FILTER_POSTERIZE: u32 = 4;
 
 /// [`UwNetEvent::kind`]: a TCP connection or listener is up, or a UDP
 /// socket is open; `text` is the address.
@@ -304,6 +314,11 @@ pub struct UwHost {
     /// Paint the window under the layout's shapes; alpha 0 for none.
     pub layout_set_background:
         extern "C" fn(ctx: *mut c_void, layout: u32, r: f64, g: f64, b: f64, a: f64),
+
+    // ---- ABI 6 ----
+    /// Show the shape's video through a `UW_FILTER_*`; `amount` 0 for the
+    /// filter's default.
+    pub shape_set_video_filter: extern "C" fn(ctx: *mut c_void, shape: u32, kind: u32, amount: f64),
 }
 
 pub type UwAbiVersionFn = unsafe extern "C" fn() -> u32;
@@ -316,3 +331,5 @@ pub type UwDeactivateFn = unsafe extern "C" fn(host: *const UwHost);
 pub type UwNetFn = unsafe extern "C" fn(host: *const UwHost, ev: *const UwNetEvent);
 pub type UwPdFn = unsafe extern "C" fn(host: *const UwHost, ev: *const UwPdEvent);
 pub type UwMediaFn = unsafe extern "C" fn(host: *const UwHost, ev: *const UwMediaEvent);
+/// The window's new size in logical pixels; also once at start.
+pub type UwResizeFn = unsafe extern "C" fn(host: *const UwHost, w: f64, h: f64);

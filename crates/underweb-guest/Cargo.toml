@@ -10,5 +10,6 @@ cairo-rs.workspace = true
 pango.workspace = true
 pangocairo.workspace = true
 underweb-ipc.workspace = true
+underweb-abi.workspace = true
 # images from the package (decoded inside the sandbox)
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif"] }

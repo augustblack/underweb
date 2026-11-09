@@ -369,3 +369,126 @@ fn native_package_shows_video() {
         "{logs:?}"
     );
 }
+
+// ---- the camera examples, with a test pattern for the camera ------------
+
+#[test]
+fn camera_effects_show_every_effect() {
+    let dir = root().join("examples/camera-effects");
+    for effect in [
+        "normal",
+        "mirror",
+        "tiles",
+        "kaleidoscope",
+        "grayscale",
+        "invert",
+        "pixelate",
+        "posterize",
+    ] {
+        let mut r = start(
+            &dir,
+            &[("source", "test:smpte"), ("effect", effect)],
+            PermissionPolicy::AllowDeclared,
+            None,
+        );
+        r.until(|r| r.logged("ready").is_some() && r.frame.is_some());
+        assert!(
+            r.logged("ready 640x360").is_some(),
+            "{effect}: {:?}",
+            r.logs
+        );
+        assert!(r.logged("error").is_none(), "{effect}: {:?}", r.logs);
+        r.guest.shutdown();
+    }
+}
+
+#[test]
+fn camera_effects_buttons_switch_and_filter_the_picture() {
+    let dir = root().join("examples/camera-effects");
+    let mut r = start(
+        &dir,
+        &[("source", "test:smpte")],
+        PermissionPolicy::AllowDeclared,
+        None,
+    );
+    r.until(|r| r.logged("ready").is_some());
+    // at 640x360 the picture is 397x298 at (16, 46): this point shows the
+    // test pattern's yellow bar
+    let yellow = |r: &mut Run| {
+        r.frame = None;
+        r.until(|r| r.frame.is_some());
+        pixel(r.frame.as_ref().unwrap(), 36, 66)
+    };
+    let p = yellow(&mut r);
+    assert!(p[0] > 150 && p[1] > 150 && p[2] < 80, "not yellow: {p:?}");
+
+    // the buttons are a column at x 429..559, 40 apart from y 46
+    let press = |r: &Run, i: f64| {
+        r.guest
+            .pointer(
+                underweb_core::UW_POINTER_PRESS,
+                1,
+                480.0,
+                46.0 + i * 40.0 + 17.0,
+            )
+            .unwrap()
+    };
+    press(&r, 5.0); // invert
+    r.until(|r| r.logged("effect invert").is_some());
+    assert!(r.logged("effect invert").is_some(), "{:?}", r.logs);
+    std::thread::sleep(Duration::from_millis(200));
+    let p = yellow(&mut r);
+    assert!(
+        p[0] < 100 && p[1] < 100 && p[2] > 150,
+        "not inverted: {p:?}"
+    );
+
+    press(&r, 1.0); // mirror
+    r.until(|r| r.logged("effect mirror").is_some());
+    assert!(r.logged("effect mirror").is_some(), "{:?}", r.logs);
+    r.guest.shutdown();
+}
+
+#[test]
+fn camera_broadcast_goes_live() {
+    let tmp = tempfile::tempdir().unwrap();
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let received = Arc::new(std::sync::Mutex::new(Vec::<u8>::new()));
+    {
+        let received = received.clone();
+        std::thread::spawn(move || {
+            let (mut s, _) = listener.accept().unwrap();
+            let mut buf = [0u8; 4096];
+            while let Ok(n) = s.read(&mut buf) {
+                if n == 0 {
+                    break;
+                }
+                received.lock().unwrap().extend_from_slice(&buf[..n]);
+            }
+        });
+    }
+    let dir = with_permissions(
+        "camera-broadcast",
+        tmp.path(),
+        &format!("net.tcp.connect = [\"127.0.0.1:{port}\"]"),
+    );
+    let url = format!("http://127.0.0.1:{port}/camera.ogg");
+    let mut r = start(
+        &dir,
+        &[("source", "test:ball"), ("url", &url), ("live", "1")],
+        PermissionPolicy::AllowDeclared,
+        None,
+    );
+    r.until(|r| r.logged("broadcasting").is_some() || r.logged("error").is_some());
+    assert!(r.logged("broadcasting").is_some(), "{:?}", r.logs);
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while Instant::now() < deadline && !received.lock().unwrap().windows(4).any(|w| w == b"OggS") {
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    r.guest.shutdown();
+    let data = received.lock().unwrap();
+    let head = String::from_utf8_lossy(&data[..data.len().min(400)]);
+    assert!(head.starts_with("PUT /camera.ogg HTTP/1.1\r\n"), "{head}");
+    assert!(data.windows(4).any(|w| w == b"OggS"), "no Ogg data");
+}

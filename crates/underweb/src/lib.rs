@@ -463,6 +463,15 @@ impl Layout {
     }
 }
 
+fn host_v6() -> &'static UwHost {
+    let h = host();
+    assert!(
+        h.abi_version >= 6,
+        "this browser is too old for video filters"
+    );
+    h
+}
+
 fn host_v5() -> &'static UwHost {
     let h = host();
     assert!(
@@ -674,6 +683,31 @@ impl Shape {
         (h.shape_set_image)(h.ctx, self.0, image.map_or(0, |i| i.0));
         self
     }
+    /// Show the shape's video through an effect.
+    pub fn set_video_filter(&self, filter: VideoFilter) -> &Self {
+        let h = host_v6();
+        let (kind, amount) = match filter {
+            VideoFilter::None => (abi::UW_FILTER_NONE, 0.0),
+            VideoFilter::Grayscale => (abi::UW_FILTER_GRAYSCALE, 0.0),
+            VideoFilter::Invert => (abi::UW_FILTER_INVERT, 0.0),
+            VideoFilter::Pixelate(px) => (abi::UW_FILTER_PIXELATE, px as f64),
+            VideoFilter::Posterize(levels) => (abi::UW_FILTER_POSTERIZE, levels as f64),
+        };
+        (h.shape_set_video_filter)(h.ctx, self.0, kind, amount);
+        self
+    }
+}
+
+/// An effect on a shape's video ([`Shape::set_video_filter`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VideoFilter {
+    None,
+    Grayscale,
+    Invert,
+    /// Blocks of this many video pixels.
+    Pixelate(u32),
+    /// This many levels per colour channel.
+    Posterize(u32),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -699,6 +733,9 @@ pub trait Page: Default + 'static {
     /// Called every display frame while animating; `dt` in seconds.
     fn update(&mut self, _window: &Window, _dt: f64) {}
     fn pointer(&mut self, _window: &Window, _ev: &PointerEvent) {}
+    /// The window's size in logical pixels: once at start, then on every
+    /// change.
+    fn resize(&mut self, _window: &Window, _width: f64, _height: f64) {}
     /// A network event for a handle from [`net`].
     fn net(&mut self, _window: &Window, _ev: &net::NetEvent) {}
     /// Something Pd sent to a receiver you subscribed to.
@@ -871,6 +908,10 @@ pub mod __private {
         with(slot, |p, w| p.media(w, &e));
     }
 
+    pub unsafe fn resize<P: Page>(slot: &'static Slot<P>, w: f64, h: f64) {
+        with(slot, |p, win| p.resize(win, w, h));
+    }
+
     pub unsafe fn deactivate<P: Page>(slot: &'static Slot<P>) {
         with(slot, |p, w| p.deactivate(w));
         guard(|| slot.with(|p| *p.borrow_mut() = None));
@@ -918,6 +959,10 @@ macro_rules! export_page {
         #[unsafe(no_mangle)]
         pub unsafe extern "C" fn uw_media(_host: *const $crate::abi::UwHost, ev: *const $crate::abi::UwMediaEvent) {
             unsafe { $crate::__private::media::<$page>(&__UW_PAGE, ev) }
+        }
+        #[unsafe(no_mangle)]
+        pub unsafe extern "C" fn uw_resize(_host: *const $crate::abi::UwHost, w: f64, h: f64) {
+            unsafe { $crate::__private::resize::<$page>(&__UW_PAGE, w, h) }
         }
         $crate::__export_draw!($page, __UW_PAGE);
         #[unsafe(no_mangle)]
