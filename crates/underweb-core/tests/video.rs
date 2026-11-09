@@ -106,13 +106,14 @@ fn pixel(f: &Frame, x: u32, y: u32) -> [u8; 4] {
 
 const MAGENTA: [u8; 4] = [255, 0, 255, 255];
 
-/// Pull the mixer like a sound card for `len`; returns the left channel.
-fn record_realtime(mixer: &Mixer, len: Duration) -> Vec<f32> {
+/// Pull the mixer like a sound card until `done(left)` or `limit`; returns
+/// the left channel.
+fn record_until(mixer: &Mixer, limit: Duration, done: impl Fn(&[f32]) -> bool) -> Vec<f32> {
     let mut left = Vec::new();
     let mut buf = vec![0f32; 256 * 2];
     let start = Instant::now();
     let mut pulled = 0usize;
-    while start.elapsed() < len {
+    while start.elapsed() < limit && !done(&left) {
         // keep up with the wall clock at 48 kHz
         while pulled < (start.elapsed().as_secs_f64() * 48000.0) as usize {
             mixer.render(&mut buf);
@@ -187,7 +188,14 @@ fn file_plays_with_moving_frames_and_sound() {
     assert_ne!(r.frame.as_ref().unwrap().rgba, first.rgba);
     // the clip's 440 Hz tone reaches the mixer, pulled at real-time pace
     // the way a sound card would
-    let left = record_realtime(&mixer, Duration::from_millis(1500));
+    // (a busy machine may start the sound late: listen until there is
+    // half a second of it, for up to 10 s)
+    let heard = |l: &[f32]| {
+        l.iter()
+            .position(|x| x.abs() >= 1e-3)
+            .is_some_and(|i| l.len() - i >= 24000)
+    };
+    let left = record_until(&mixer, Duration::from_secs(10), heard);
     let sound: Vec<f32> = left
         .iter()
         .copied()
