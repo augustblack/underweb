@@ -5,3 +5,6 @@
 
 # local read-only GitHub token (CI logs)
 .gh_read_only
+
+# macOS Finder
+.DS_Store

@@ -25,7 +25,7 @@ export function activate() {
   status.text = `Sending ${source} to ${url}...`;
   layout.append(status);
 
-  const out = video.broadcast(source, url, { password });
+  const out = video.broadcast(source, url, { password }).play();
   local.video = out;
   out.onerror = (m) => (status.text = `Not sending: ${m}`);
   out.onbroadcasting = () => {
